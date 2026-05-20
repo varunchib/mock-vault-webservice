@@ -155,7 +155,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
 		FROM vaultcore.questions
-		ORDER BY exam_name, year DESC, question_no
+		ORDER BY exam_name, year DESC, question_no::INTEGER NULLS LAST, question_no
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list questions: %w", err)
@@ -178,7 +178,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
 		FROM vaultcore.questions
 		WHERE exam_slug = $1
-		ORDER BY year DESC, question_no
+		ORDER BY year DESC, question_no::INTEGER NULLS LAST, question_no
 	`, examSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list questions by exam: %w", err)
@@ -201,7 +201,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
-		ORDER BY question_no
+		ORDER BY question_no::INTEGER NULLS LAST, question_no
 	`, paperSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list questions by paper: %w", err)
@@ -596,6 +596,61 @@ func (r *PostgresRepository) UpsertPaperWithQuestions(ctx context.Context, req m
 	}
 
 	return tx.Commit()
+}
+
+type UpdateQuestionInput struct {
+	Question    string
+	Options     []models.QuestionOption
+	AnswerKey   string
+	Explanation string
+	Subject     string
+	Tags        []string
+}
+
+func (r *PostgresRepository) UpdateQuestionBySlug(ctx context.Context, slug string, input UpdateQuestionInput) error {
+	optionsJSON, err := json.Marshal(input.Options)
+	if err != nil {
+		return fmt.Errorf("marshal options: %w", err)
+	}
+	tags := input.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("marshal tags: %w", err)
+	}
+	// derive answer text from options
+	answerText := input.AnswerKey
+	for _, opt := range input.Options {
+		if strings.EqualFold(opt.Key, input.AnswerKey) {
+			answerText = opt.Text
+			break
+		}
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE vaultcore.questions
+		SET question    = $1,
+		    options     = $2,
+		    answer_key  = $3,
+		    answer      = $4,
+		    explanation = $5,
+		    subject     = $6,
+		    tags        = $7,
+		    updated_at  = CURRENT_TIMESTAMP
+		WHERE slug = $8
+	`, input.Question, optionsJSON, input.AnswerKey, answerText, input.Explanation, input.Subject, tagsJSON, slug)
+	if err != nil {
+		return fmt.Errorf("update question: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update question rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *PostgresRepository) DeleteQuestionBySlug(ctx context.Context, slug string) error {

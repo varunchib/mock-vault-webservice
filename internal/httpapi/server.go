@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 
@@ -204,9 +205,15 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/admin/mocks", s.withAuth(http.HandlerFunc(s.handleCreateMock), true))
 	s.mux.Handle("DELETE /api/v1/admin/mocks/{slug}", s.withAuth(http.HandlerFunc(s.handleDeleteMock), true))
 	s.mux.Handle("DELETE /api/v1/admin/questions/{slug}", s.withAuth(http.HandlerFunc(s.handleDeleteQuestion), true))
+	s.mux.Handle("PUT /api/v1/admin/questions/{slug}", s.withAuth(http.HandlerFunc(s.handleUpdateQuestion), true))
 	s.mux.Handle("POST /api/v1/admin/papers", s.withAuth(http.HandlerFunc(s.handleCreatePaper), true))
 	s.mux.Handle("DELETE /api/v1/admin/papers/{slug}", s.withAuth(http.HandlerFunc(s.handleDeletePaper), true))
 	s.mux.Handle("POST /api/v1/admin/cache-flush", s.withAuth(http.HandlerFunc(s.handleFlushCache), true))
+
+	// Reports
+	s.mux.Handle("POST /api/v1/reports", s.withAuth(http.HandlerFunc(s.handleSubmitReport), false))
+	s.mux.Handle("GET /api/v1/admin/reports", s.withAuth(http.HandlerFunc(s.handleListReports), true))
+	s.mux.Handle("DELETE /api/v1/admin/reports", s.withAuth(http.HandlerFunc(s.handleClearReports), true))
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -565,6 +572,52 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question deleted"})
+}
+
+func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
+	slug := strings.TrimSpace(r.PathValue("slug"))
+	if slug == "" {
+		s.respondError(w, http.StatusBadRequest, "Question slug is required")
+		return
+	}
+	var req models.AdminUpdateQuestionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.Question = strings.TrimSpace(req.Question)
+	req.AnswerKey = strings.ToUpper(strings.TrimSpace(req.AnswerKey))
+	req.Explanation = strings.TrimSpace(req.Explanation)
+	req.Subject = strings.TrimSpace(req.Subject)
+	if req.Question == "" {
+		s.respondError(w, http.StatusBadRequest, "question text is required")
+		return
+	}
+	if len(cleanOptions(req.Options)) < 2 {
+		s.respondError(w, http.StatusBadRequest, "at least two options are required")
+		return
+	}
+	if req.AnswerKey == "" {
+		s.respondError(w, http.StatusBadRequest, "answerKey is required")
+		return
+	}
+	if req.Tags == nil {
+		req.Tags = []string{}
+	}
+	input := repository.UpdateQuestionInput{
+		Question:    req.Question,
+		Options:     cleanOptions(req.Options),
+		AnswerKey:   req.AnswerKey,
+		Explanation: req.Explanation,
+		Subject:     req.Subject,
+		Tags:        cleanStrings(req.Tags),
+	}
+	if err := s.repo.UpdateQuestionBySlug(r.Context(), slug, input); err != nil {
+		s.respondRepositoryError(w, err)
+		return
+	}
+	s.invalidatePublicCache(r.Context())
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question updated", "slug": slug})
 }
 
 func (s *Server) handleCreateExam(w http.ResponseWriter, r *http.Request) {
@@ -1000,4 +1053,58 @@ func sameSiteMode(value string) http.SameSite {
 func userFromContext(ctx context.Context) (models.User, bool) {
 	user, ok := ctx.Value(authUserKey).(models.User)
 	return user, ok
+}
+
+// ── Reports ──────────────────────────────────────────────────────────────────
+
+const reportListKey = "admin:reports"
+
+func (s *Server) handleSubmitReport(w http.ResponseWriter, r *http.Request) {
+	user, _ := userFromContext(r.Context())
+	var req struct {
+		QuestionSlug string `json:"questionSlug"`
+		QuestionNo   string `json:"questionNo"`
+		PaperSlug    string `json:"paperSlug"`
+		ReportType   string `json:"reportType"`
+		Details      string `json:"details"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.QuestionSlug == "" || req.ReportType == "" {
+		s.respondError(w, http.StatusBadRequest, "questionSlug and reportType are required")
+		return
+	}
+	entry := map[string]interface{}{
+		"questionSlug": req.QuestionSlug,
+		"questionNo":   req.QuestionNo,
+		"paperSlug":    req.PaperSlug,
+		"reportType":   req.ReportType,
+		"details":      strings.TrimSpace(req.Details),
+		"userId":       user.ID,
+		"userEmail":    user.Email,
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(entry)
+	s.rdb.RPush(r.Context(), reportListKey, string(data))
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Report submitted"})
+}
+
+func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.rdb.LRange(r.Context(), reportListKey, 0, -1).Result()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch reports")
+		return
+	}
+	result := make([]json.RawMessage, 0, len(raw))
+	for _, item := range raw {
+		result = append(result, json.RawMessage(item))
+	}
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{"reports": result, "count": len(result)})
+}
+
+func (s *Server) handleClearReports(w http.ResponseWriter, r *http.Request) {
+	s.rdb.Del(r.Context(), reportListKey)
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Reports cleared"})
 }

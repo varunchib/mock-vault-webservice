@@ -103,6 +103,15 @@ type AdminPaperQuestionInput struct {
 	Tags        []string         `json:"tags"`
 }
 
+type AdminUpdateQuestionRequest struct {
+	Question    string           `json:"question"`
+	Options     []QuestionOption `json:"options"`
+	AnswerKey   string           `json:"answerKey"`
+	Explanation string           `json:"explanation"`
+	Subject     string           `json:"subject"`
+	Tags        []string         `json:"tags"`
+}
+
 type AdminCreatePaperRequest struct {
 	Slug        string                    `json:"slug"`
 	ExamSlug    string                    `json:"examSlug"`
