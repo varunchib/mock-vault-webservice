@@ -59,12 +59,22 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
 }
 
+const examSelectSQL = `
+	SELECT
+	  e.slug, e.name, e.short_name, e.category, e.icon, e.description, e.popular_years,
+	  CAST((SELECT COUNT(*) FROM vaultcore.papers p WHERE p.exam_slug = e.slug) AS text),
+	  CAST((SELECT COALESCE(SUM(p2.questions),0) FROM vaultcore.papers p2 WHERE p2.exam_slug = e.slug) AS text),
+	  CAST((SELECT COUNT(*) FROM vaultcore.mocks m WHERE m.exam_slug = e.slug) AS text),
+	  COALESCE(
+	    (SELECT array_to_json(array_agg(DISTINCT q.subject ORDER BY q.subject))
+	     FROM vaultcore.questions q
+	     WHERE q.exam_slug = e.slug AND q.paper_slug IS NOT NULL AND q.subject != ''),
+	    '[]'::json
+	  )
+	FROM vaultcore.exams e`
+
 func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, name, short_name, category, icon, total_questions, papers, mocks, description, popular_years, subjects
-		FROM vaultcore.exams
-		ORDER BY name
-	`)
+	rows, err := r.db.QueryContext(ctx, examSelectSQL+` ORDER BY e.name`)
 	if err != nil {
 		return nil, fmt.Errorf("list exams: %w", err)
 	}
@@ -82,11 +92,7 @@ func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, erro
 }
 
 func (r *PostgresRepository) GetExamBySlug(ctx context.Context, slug string) (models.Exam, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, name, short_name, category, icon, total_questions, papers, mocks, description, popular_years, subjects
-		FROM vaultcore.exams
-		WHERE slug = $1
-	`, slug)
+	row := r.db.QueryRowContext(ctx, examSelectSQL+` WHERE e.slug = $1`, slug)
 	exam, err := scanExam(row)
 	if err != nil {
 		return models.Exam{}, mapNotFound(err)
@@ -816,11 +822,11 @@ func scanExam(row rowScanner) (models.Exam, error) {
 		&exam.ShortName,
 		&exam.Category,
 		&exam.Icon,
-		&exam.TotalQuestions,
-		&exam.Papers,
-		&exam.Mocks,
 		&exam.Description,
 		&popularYearsRaw,
+		&exam.Papers,
+		&exam.TotalQuestions,
+		&exam.Mocks,
 		&subjectsRaw,
 	); err != nil {
 		return models.Exam{}, err
@@ -1038,10 +1044,8 @@ func (r *PostgresRepository) RecordAttempt(ctx context.Context, id, userID, exam
 }
 
 func (r *PostgresRepository) ListUserEnrollments(ctx context.Context, userID string) ([]models.Exam, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT e.slug, e.name, e.short_name, e.category, e.icon, e.total_questions, e.papers, e.mocks, e.description, e.popular_years, e.subjects
-		FROM vaultcore.user_enrollments ue
-		JOIN vaultcore.exams e ON ue.exam_slug = e.slug
+	rows, err := r.db.QueryContext(ctx, examSelectSQL+`
+		JOIN vaultcore.user_enrollments ue ON ue.exam_slug = e.slug
 		WHERE ue.user_id = $1
 		ORDER BY ue.enrolled_at DESC
 		LIMIT 8
