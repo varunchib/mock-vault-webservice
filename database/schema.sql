@@ -177,6 +177,32 @@ CREATE INDEX IF NOT EXISTS idx_papers_exam_slug ON vaultcore.papers(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_mocks_exam_slug ON vaultcore.mocks(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON vaultcore.auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON vaultcore.auth_sessions(expires_at);
-CREATE INDEX IF NOT EXISTS idx_user_attempts_user_id ON vaultcore.user_attempts(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_attempts_mock_slug ON vaultcore.user_attempts(mock_slug);
+ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS paper_slug       TEXT     REFERENCES vaultcore.papers(slug) ON DELETE SET NULL;
+ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS attempt_number   INTEGER  NOT NULL DEFAULT 1;
+ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS is_official       BOOLEAN  NOT NULL DEFAULT TRUE;
+
+ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS negative_marking NUMERIC(4,2) NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.mocks  ADD COLUMN IF NOT EXISTS negative_marking NUMERIC(4,2) NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS vaultcore.exam_cutoffs (
+  id          SERIAL       PRIMARY KEY,
+  exam_slug   TEXT         NOT NULL REFERENCES vaultcore.exams(slug) ON DELETE CASCADE,
+  stage       TEXT         NOT NULL,
+  year        TEXT         NOT NULL,
+  category    TEXT         NOT NULL,
+  marks       NUMERIC(8,2) NOT NULL,
+  total_marks NUMERIC(8,2) NOT NULL DEFAULT 0,
+  avg_score   NUMERIC(8,2) NOT NULL DEFAULT 0,
+  std_dev     NUMERIC(8,2) NOT NULL DEFAULT 0,
+  source      TEXT         NOT NULL DEFAULT 'official',
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (exam_slug, stage, year, category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_attempts_user_id    ON vaultcore.user_attempts(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_attempts_mock_slug  ON vaultcore.user_attempts(mock_slug);
+CREATE INDEX IF NOT EXISTS idx_user_attempts_paper_slug ON vaultcore.user_attempts(paper_slug);
+CREATE INDEX IF NOT EXISTS idx_user_attempts_exam_slug  ON vaultcore.user_attempts(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_user_attempts_completed_at ON vaultcore.user_attempts(completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exam_cutoffs_exam_slug   ON vaultcore.exam_cutoffs(exam_slug);

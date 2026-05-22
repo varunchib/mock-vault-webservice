@@ -46,6 +46,7 @@ type CreateMockInput struct {
 	DurationMinutes int
 	Difficulty      string
 	IsFree          bool
+	NegativeMarking float64
 	Subjects        []string
 	Questions       []MockQuestionInput
 }
@@ -95,7 +96,7 @@ func (r *PostgresRepository) GetExamBySlug(ctx context.Context, slug string) (mo
 
 func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
 		FROM vaultcore.papers
 		ORDER BY exam_name, year DESC, title
 	`)
@@ -117,7 +118,7 @@ func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, er
 
 func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug string) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
 		FROM vaultcore.papers
 		WHERE exam_slug = $1
 		ORDER BY year DESC, title
@@ -140,7 +141,7 @@ func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug stri
 
 func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (models.Paper, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
 		FROM vaultcore.papers
 		WHERE slug = $1
 	`, slug)
@@ -257,7 +258,7 @@ func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string)
 
 func (r *PostgresRepository) ListMocks(ctx context.Context) ([]models.MockItem, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects
+		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking
 		FROM vaultcore.mocks
 		ORDER BY exam_name, title
 	`)
@@ -279,7 +280,7 @@ func (r *PostgresRepository) ListMocks(ctx context.Context) ([]models.MockItem, 
 
 func (r *PostgresRepository) GetMockBySlug(ctx context.Context, slug string) (models.MockItem, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects
+		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking
 		FROM vaultcore.mocks
 		WHERE slug = $1
 	`, slug)
@@ -353,8 +354,8 @@ func (r *PostgresRepository) UpsertMockWithQuestions(ctx context.Context, input 
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO vaultcore.mocks (slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+		INSERT INTO vaultcore.mocks (slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
 		ON CONFLICT (slug) DO UPDATE SET
 			exam_slug = EXCLUDED.exam_slug,
 			exam_name = EXCLUDED.exam_name,
@@ -365,8 +366,9 @@ func (r *PostgresRepository) UpsertMockWithQuestions(ctx context.Context, input 
 			difficulty = EXCLUDED.difficulty,
 			is_free = EXCLUDED.is_free,
 			subjects = EXCLUDED.subjects,
+			negative_marking = EXCLUDED.negative_marking,
 			updated_at = CURRENT_TIMESTAMP
-	`, input.Slug, input.ExamSlug, examShortName, input.Title, input.Description, len(input.Questions), input.DurationMinutes, input.Difficulty, input.IsFree, subjectsRaw)
+	`, input.Slug, input.ExamSlug, examShortName, input.Title, input.Description, len(input.Questions), input.DurationMinutes, input.Difficulty, input.IsFree, subjectsRaw, input.NegativeMarking)
 	if err != nil {
 		return fmt.Errorf("upsert mock: %w", err)
 	}
@@ -502,8 +504,8 @@ func (r *PostgresRepository) UpsertPaperWithQuestions(ctx context.Context, req m
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO vaultcore.papers (slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+		INSERT INTO vaultcore.papers (slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
 		ON CONFLICT (slug) DO UPDATE SET
 			exam_slug = EXCLUDED.exam_slug,
 			exam_name = EXCLUDED.exam_name,
@@ -513,8 +515,9 @@ func (r *PostgresRepository) UpsertPaperWithQuestions(ctx context.Context, req m
 			description = EXCLUDED.description,
 			questions = EXCLUDED.questions,
 			subjects = EXCLUDED.subjects,
+			negative_marking = EXCLUDED.negative_marking,
 			updated_at = CURRENT_TIMESTAMP
-	`, req.Slug, req.ExamSlug, examShortName, req.Title, year, req.Shift, req.Description, len(req.Questions), subjectsRaw)
+	`, req.Slug, req.ExamSlug, examShortName, req.Title, year, req.Shift, req.Description, len(req.Questions), subjectsRaw, req.NegativeMarking)
 	if err != nil {
 		return fmt.Errorf("upsert paper: %w", err)
 	}
@@ -846,6 +849,7 @@ func scanPaper(row rowScanner) (models.Paper, error) {
 		&paper.Description,
 		&paper.Questions,
 		&subjectsRaw,
+		&paper.NegativeMarking,
 	); err != nil {
 		return models.Paper{}, err
 	}
@@ -904,6 +908,7 @@ func scanMock(row rowScanner) (models.MockItem, error) {
 		&mock.Difficulty,
 		&mock.IsFree,
 		&subjectsRaw,
+		&mock.NegativeMarking,
 	); err != nil {
 		return models.MockItem{}, err
 	}
@@ -1016,10 +1021,19 @@ func (r *PostgresRepository) RecordAttempt(ctx context.Context, id, userID, exam
 	if paperSlug != "" {
 		paperVal = sql.NullString{String: paperSlug, Valid: true}
 	}
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO vaultcore.user_attempts (id, user_id, exam_slug, mock_slug, paper_slug, score, total_questions, correct_answers, wrong_answers, skipped_answers, time_taken_seconds, answers)
-		VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, 0, 0, '{}')
-	`, id, userID, examSlug, mockVal, paperVal)
+	// Determine attempt number; attempt 1 is official, subsequent are practice
+	attemptNum, err := r.GetNextAttemptNumber(ctx, userID, examSlug, mockSlug, paperSlug)
+	if err != nil {
+		attemptNum = 1
+	}
+	isOfficial := attemptNum == 1
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO vaultcore.user_attempts
+			(id, user_id, exam_slug, mock_slug, paper_slug, score, total_questions,
+			 correct_answers, wrong_answers, skipped_answers, time_taken_seconds, answers,
+			 attempt_number, is_official)
+		VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0, 0, 0, '{}', $6, $7)
+	`, id, userID, examSlug, mockVal, paperVal, attemptNum, isOfficial)
 	return err
 }
 
@@ -1080,4 +1094,90 @@ func (r *PostgresRepository) ListUserRecentAttempts(ctx context.Context, userID 
 		attempts = append(attempts, a)
 	}
 	return attempts, rows.Err()
+}
+
+// GetExamCutoffs returns all cutoff sets for an exam, grouped by (stage, year), newest year first.
+func (r *PostgresRepository) GetExamCutoffs(ctx context.Context, examSlug string) ([]models.ExamCutoffSet, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT stage, year, category, marks, total_marks, avg_score, std_dev, source
+		FROM vaultcore.exam_cutoffs
+		WHERE exam_slug = $1
+		ORDER BY year DESC, stage, category
+	`, examSlug)
+	if err != nil {
+		return nil, fmt.Errorf("get exam cutoffs: %w", err)
+	}
+	defer rows.Close()
+
+	type key struct{ stage, year string }
+	index := make(map[key]int)
+	var sets []models.ExamCutoffSet
+
+	for rows.Next() {
+		var stage, year, category, source string
+		var marks, totalMarks, avgScore, stdDev float64
+		if err := rows.Scan(&stage, &year, &category, &marks, &totalMarks, &avgScore, &stdDev, &source); err != nil {
+			return nil, fmt.Errorf("scan exam cutoff: %w", err)
+		}
+		k := key{stage, year}
+		i, exists := index[k]
+		if !exists {
+			sets = append(sets, models.ExamCutoffSet{
+				Stage:      stage,
+				Year:       year,
+				TotalMarks: totalMarks,
+				AvgScore:   avgScore,
+				StdDev:     stdDev,
+			})
+			i = len(sets) - 1
+			index[k] = i
+		}
+		sets[i].Cutoffs = append(sets[i].Cutoffs, models.CutoffCategoryEntry{
+			Category: category,
+			Marks:    marks,
+			Source:   source,
+		})
+	}
+	if sets == nil {
+		sets = []models.ExamCutoffSet{}
+	}
+	return sets, rows.Err()
+}
+
+// UpsertExamCutoff inserts or updates a single cutoff row.
+func (r *PostgresRepository) UpsertExamCutoff(ctx context.Context, examSlug, stage, year, category, source string, marks, totalMarks, avgScore, stdDev float64) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO vaultcore.exam_cutoffs
+			(exam_slug, stage, year, category, marks, total_marks, avg_score, std_dev, source, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,CURRENT_TIMESTAMP)
+		ON CONFLICT (exam_slug, stage, year, category) DO UPDATE SET
+			marks       = EXCLUDED.marks,
+			total_marks = EXCLUDED.total_marks,
+			avg_score   = EXCLUDED.avg_score,
+			std_dev     = EXCLUDED.std_dev,
+			source      = EXCLUDED.source,
+			updated_at  = CURRENT_TIMESTAMP
+	`, examSlug, stage, year, category, source, marks, totalMarks, avgScore, stdDev)
+	return err
+}
+
+// GetNextAttemptNumber returns how many times a user has attempted a paper/mock and what their next attempt number is.
+func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, examSlug, mockSlug, paperSlug string) (int, error) {
+	var count int
+	var err error
+	if paperSlug != "" {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM vaultcore.user_attempts
+			WHERE user_id=$1 AND exam_slug=$2 AND paper_slug=$3
+		`, userID, examSlug, paperSlug).Scan(&count)
+	} else {
+		err = r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM vaultcore.user_attempts
+			WHERE user_id=$1 AND exam_slug=$2 AND mock_slug=$3
+		`, userID, examSlug, mockSlug).Scan(&count)
+	}
+	if err != nil {
+		return 1, fmt.Errorf("get attempt number: %w", err)
+	}
+	return count + 1, nil
 }

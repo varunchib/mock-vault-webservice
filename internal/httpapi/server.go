@@ -193,6 +193,10 @@ func (s *Server) registerRoutes() {
 		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
 			return "mock:questions:" + r.PathValue("slug")
 		}, s.handleListMockQuestions)))
+	s.mux.Handle("GET /api/v1/exams/{slug}/cutoffs", s.withRateLimit("pub", 120, time.Minute,
+		s.cachedPublicKey(24*time.Hour, func(r *http.Request) string {
+			return "cutoffs:exam:" + r.PathValue("slug")
+		}, s.handleGetExamCutoffs)))
 
 	s.mux.Handle("GET /api/v1/dashboard", s.withAuth(http.HandlerFunc(s.handleDashboard), false))
 	s.mux.Handle("POST /api/v1/activity/enroll", s.withAuth(http.HandlerFunc(s.handleEnroll), false))
@@ -209,6 +213,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/admin/papers", s.withAuth(http.HandlerFunc(s.handleCreatePaper), true))
 	s.mux.Handle("DELETE /api/v1/admin/papers/{slug}", s.withAuth(http.HandlerFunc(s.handleDeletePaper), true))
 	s.mux.Handle("POST /api/v1/admin/cache-flush", s.withAuth(http.HandlerFunc(s.handleFlushCache), true))
+	s.mux.Handle("POST /api/v1/admin/cutoffs", s.withAuth(http.HandlerFunc(s.handleUpsertCutoff), true))
 
 	// Reports
 	s.mux.Handle("POST /api/v1/reports", s.withAuth(http.HandlerFunc(s.handleSubmitReport), false))
@@ -329,6 +334,68 @@ func (s *Server) handleGetMock(w http.ResponseWriter, r *http.Request) (any, err
 
 func (s *Server) handleListMockQuestions(w http.ResponseWriter, r *http.Request) (any, error) {
 	return s.repo.ListQuestionsByMock(r.Context(), r.PathValue("slug"))
+}
+
+func (s *Server) handleGetExamCutoffs(w http.ResponseWriter, r *http.Request) (any, error) {
+	return s.repo.GetExamCutoffs(r.Context(), r.PathValue("slug"))
+}
+
+func (s *Server) handleUpsertCutoff(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExamSlug   string  `json:"examSlug"`
+		Stage      string  `json:"stage"`
+		Year       string  `json:"year"`
+		Category   string  `json:"category"`
+		Marks      float64 `json:"marks"`
+		TotalMarks float64 `json:"totalMarks"`
+		AvgScore   float64 `json:"avgScore"`
+		StdDev     float64 `json:"stdDev"`
+		Source     string  `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.ExamSlug = strings.TrimSpace(req.ExamSlug)
+	req.Stage = strings.TrimSpace(req.Stage)
+	req.Year = strings.TrimSpace(req.Year)
+	req.Category = strings.TrimSpace(req.Category)
+	if req.Source == "" {
+		req.Source = "official"
+	}
+	switch {
+	case req.ExamSlug == "":
+		s.respondError(w, http.StatusBadRequest, "examSlug is required")
+		return
+	case req.Stage == "":
+		s.respondError(w, http.StatusBadRequest, "stage is required")
+		return
+	case req.Year == "":
+		s.respondError(w, http.StatusBadRequest, "year is required")
+		return
+	case req.Category == "":
+		s.respondError(w, http.StatusBadRequest, "category is required")
+		return
+	case req.Marks <= 0:
+		s.respondError(w, http.StatusBadRequest, "marks must be greater than zero")
+		return
+	case req.TotalMarks <= 0:
+		s.respondError(w, http.StatusBadRequest, "totalMarks must be greater than zero")
+		return
+	}
+	if err := s.repo.UpsertExamCutoff(r.Context(),
+		req.ExamSlug, req.Stage, req.Year, req.Category, req.Source,
+		req.Marks, req.TotalMarks, req.AvgScore, req.StdDev,
+	); err != nil {
+		s.respondRepositoryError(w, err)
+		return
+	}
+	// Invalidate the cached cutoffs for this exam
+	if s.rdb != nil {
+		key := "pub:cutoffs:exam:" + req.ExamSlug
+		s.rdb.Del(r.Context(), key)
+	}
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "cutoff saved"})
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -801,6 +868,7 @@ func validateCreateMockRequest(req models.AdminCreateMockRequest) (repository.Cr
 		DurationMinutes: req.DurationMinutes,
 		Difficulty:      strings.TrimSpace(req.Difficulty),
 		IsFree:          req.IsFree,
+		NegativeMarking: req.NegativeMarking,
 		Subjects:        cleanStrings(req.Subjects),
 		Questions:       make([]repository.MockQuestionInput, 0, len(req.Questions)),
 	}

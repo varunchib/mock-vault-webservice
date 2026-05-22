@@ -39,15 +39,16 @@ type Question struct {
 }
 
 type Paper struct {
-	Slug        string   `json:"slug"`
-	ExamSlug    string   `json:"examSlug"`
-	ExamName    string   `json:"examName"`
-	Title       string   `json:"title"`
-	Year        string   `json:"year"`
-	Shift       string   `json:"shift"`
-	Description string   `json:"description"`
-	Questions   int      `json:"questions"`
-	Subjects    []string `json:"subjects"`
+	Slug            string   `json:"slug"`
+	ExamSlug        string   `json:"examSlug"`
+	ExamName        string   `json:"examName"`
+	Title           string   `json:"title"`
+	Year            string   `json:"year"`
+	Shift           string   `json:"shift"`
+	Description     string   `json:"description"`
+	Questions       int      `json:"questions"`
+	Subjects        []string `json:"subjects"`
+	NegativeMarking float64  `json:"negativeMarking"`
 }
 
 type MockItem struct {
@@ -61,6 +62,23 @@ type MockItem struct {
 	Difficulty      string   `json:"difficulty"`
 	IsFree          bool     `json:"isFree"`
 	Subjects        []string `json:"subjects"`
+	NegativeMarking float64  `json:"negativeMarking"`
+}
+
+// ExamCutoffSet groups all cutoff rows for one (exam, stage, year) combination.
+type ExamCutoffSet struct {
+	Stage      string                `json:"stage"`
+	Year       string                `json:"year"`
+	TotalMarks float64               `json:"totalMarks"`
+	AvgScore   float64               `json:"avgScore"`
+	StdDev     float64               `json:"stdDev"`
+	Cutoffs    []CutoffCategoryEntry `json:"cutoffs"`
+}
+
+type CutoffCategoryEntry struct {
+	Category string  `json:"category"`
+	Marks    float64 `json:"marks"`
+	Source   string  `json:"source"`
 }
 
 type AdminMockQuestionInput struct {
@@ -89,6 +107,7 @@ type AdminCreateMockRequest struct {
 	DurationMinutes int                      `json:"durationMinutes"`
 	Difficulty      string                   `json:"difficulty"`
 	IsFree          bool                     `json:"isFree"`
+	NegativeMarking float64                  `json:"negativeMarking"`
 	Subjects        []string                 `json:"subjects"`
 	Questions       []AdminMockQuestionInput `json:"questions"`
 }
@@ -113,14 +132,15 @@ type AdminUpdateQuestionRequest struct {
 }
 
 type AdminCreatePaperRequest struct {
-	Slug        string                    `json:"slug"`
-	ExamSlug    string                    `json:"examSlug"`
-	Title       string                    `json:"title"`
-	Year        string                    `json:"year"`
-	Shift       string                    `json:"shift"`
-	Description string                    `json:"description"`
-	Subjects    []string                  `json:"subjects"`
-	Questions   []AdminPaperQuestionInput `json:"questions"`
+	Slug            string                    `json:"slug"`
+	ExamSlug        string                    `json:"examSlug"`
+	Title           string                    `json:"title"`
+	Year            string                    `json:"year"`
+	Shift           string                    `json:"shift"`
+	Description     string                    `json:"description"`
+	NegativeMarking float64                   `json:"negativeMarking"`
+	Subjects        []string                  `json:"subjects"`
+	Questions       []AdminPaperQuestionInput `json:"questions"`
 }
 
 type User struct {
