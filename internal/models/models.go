@@ -49,6 +49,7 @@ type Paper struct {
 	Questions       int      `json:"questions"`
 	Subjects        []string `json:"subjects"`
 	NegativeMarking float64  `json:"negativeMarking"`
+	SourceURL       string   `json:"sourceUrl"`
 }
 
 type MockItem struct {

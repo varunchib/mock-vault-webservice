@@ -102,7 +102,7 @@ func (r *PostgresRepository) GetExamBySlug(ctx context.Context, slug string) (mo
 
 func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url
 		FROM vaultcore.papers
 		ORDER BY exam_name, year DESC, title
 	`)
@@ -124,7 +124,7 @@ func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, er
 
 func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug string) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url
 		FROM vaultcore.papers
 		WHERE exam_slug = $1
 		ORDER BY year DESC, title
@@ -147,7 +147,7 @@ func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug stri
 
 func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (models.Paper, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url
 		FROM vaultcore.papers
 		WHERE slug = $1
 	`, slug)
@@ -856,6 +856,7 @@ func scanPaper(row rowScanner) (models.Paper, error) {
 		&paper.Questions,
 		&subjectsRaw,
 		&paper.NegativeMarking,
+		&paper.SourceURL,
 	); err != nil {
 		return models.Paper{}, err
 	}
