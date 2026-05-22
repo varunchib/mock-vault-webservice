@@ -1,6 +1,6 @@
 -- GS2 (CSAT): fix negative marking to 0.66, add 66-mark qualifying cutoff
 UPDATE vaultcore.papers
-SET negative_marking = 0.66
+SET negative_marking = 0.83
 WHERE slug = 'upsc-cse-prelims-2025-gs2';
 
 INSERT INTO vaultcore.exam_cutoffs
