@@ -1071,20 +1071,30 @@ func (r *PostgresRepository) ListUserEnrollments(ctx context.Context, userID str
 
 func (r *PostgresRepository) ListUserRecentAttempts(ctx context.Context, userID string, limit int) ([]models.RecentAttempt, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT
-			CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END,
-			COALESCE(ua.paper_slug, ua.mock_slug, ''),
-			ua.exam_slug,
-			COALESCE(e.short_name, ''),
-			COALESCE(p.title, m.title, ''),
-			COALESCE(p.questions, m.questions, 0),
-			ua.completed_at
-		FROM vaultcore.user_attempts ua
-		LEFT JOIN vaultcore.papers p ON ua.paper_slug = p.slug
-		LEFT JOIN vaultcore.mocks m ON ua.mock_slug = m.slug
-		LEFT JOIN vaultcore.exams e ON ua.exam_slug = e.slug
-		WHERE ua.user_id = $1
-		ORDER BY ua.completed_at DESC
+		SELECT type, slug, exam_slug, exam_name, title, questions, completed_at
+		FROM (
+			SELECT DISTINCT ON (
+				CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END,
+				COALESCE(ua.paper_slug, ua.mock_slug, '')
+			)
+				CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END AS type,
+				COALESCE(ua.paper_slug, ua.mock_slug, '') AS slug,
+				ua.exam_slug,
+				COALESCE(e.short_name, '') AS exam_name,
+				COALESCE(p.title, m.title, '') AS title,
+				COALESCE(p.questions, m.questions, 0) AS questions,
+				ua.completed_at
+			FROM vaultcore.user_attempts ua
+			LEFT JOIN vaultcore.papers p ON ua.paper_slug = p.slug
+			LEFT JOIN vaultcore.mocks m ON ua.mock_slug = m.slug
+			LEFT JOIN vaultcore.exams e ON ua.exam_slug = e.slug
+			WHERE ua.user_id = $1
+			ORDER BY
+				CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END,
+				COALESCE(ua.paper_slug, ua.mock_slug, ''),
+				ua.completed_at DESC
+		) deduped
+		ORDER BY completed_at DESC
 		LIMIT $2
 	`, userID, limit)
 	if err != nil {
