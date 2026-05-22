@@ -12,7 +12,7 @@ VALUES (
   'UPSC CSE',
   'UPSC Civil Services Examination (Prelims & Mains) — the gateway to IAS, IPS, IFS and other Group A & B services.',
   0, 0, 0,
-  '[2025]'::jsonb
+  '["2025"]'::jsonb
 )
 ON CONFLICT (slug) DO UPDATE SET
   name = EXCLUDED.name,
