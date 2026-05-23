@@ -156,45 +156,45 @@ func (s *Server) registerRoutes() {
 	// Public catalog endpoints — per-IP rate limits to block scrapers/bots.
 	// Global 300/min still applies on top of these.
 	s.mux.Handle("GET /api/v1/exams", s.withRateLimit("catalog", 60, time.Minute,
-		s.cachedPublic("catalog:exams", time.Hour, s.handleListExams)))
+		s.cachedPublic("catalog:exams", 5*time.Minute, s.handleListExams)))
 	s.mux.Handle("GET /api/v1/exams/{slug}", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(time.Hour, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "exam:" + r.PathValue("slug")
 		}, s.handleGetExam)))
 	s.mux.Handle("GET /api/v1/exams/{slug}/papers", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(time.Hour, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "papers:exam:" + r.PathValue("slug")
 		}, s.handleListExamPapers)))
 	s.mux.Handle("GET /api/v1/exams/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "questions:exam:" + r.PathValue("slug")
 		}, s.handleListExamQuestions)))
 	s.mux.Handle("GET /api/v1/questions/{slug}", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "question:" + r.PathValue("slug")
 		}, s.handleGetQuestion)))
 	s.mux.Handle("GET /api/v1/papers", s.withRateLimit("catalog", 60, time.Minute,
-		s.cachedPublic("papers:all", time.Hour, s.handleListPapers)))
+		s.cachedPublic("papers:all", 5*time.Minute, s.handleListPapers)))
 	s.mux.Handle("GET /api/v1/papers/{slug}", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(time.Hour, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "paper:" + r.PathValue("slug")
 		}, s.handleGetPaper)))
 	s.mux.Handle("GET /api/v1/papers/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "paper:questions:" + r.PathValue("slug")
 		}, s.handleListPaperQuestions)))
 	s.mux.Handle("GET /api/v1/mocks", s.withRateLimit("catalog", 60, time.Minute,
-		s.cachedPublic("mocks:all", 30*time.Minute, s.handleListMocks)))
+		s.cachedPublic("mocks:all", 5*time.Minute, s.handleListMocks)))
 	s.mux.Handle("GET /api/v1/mocks/{slug}", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "mock:" + r.PathValue("slug")
 		}, s.handleGetMock)))
 	s.mux.Handle("GET /api/v1/mocks/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(30*time.Minute, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "mock:questions:" + r.PathValue("slug")
 		}, s.handleListMockQuestions)))
 	s.mux.Handle("GET /api/v1/exams/{slug}/cutoffs", s.withRateLimit("pub", 120, time.Minute,
-		s.cachedPublicKey(24*time.Hour, func(r *http.Request) string {
+		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "cutoffs:exam:" + r.PathValue("slug")
 		}, s.handleGetExamCutoffs)))
 
