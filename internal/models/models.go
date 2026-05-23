@@ -52,6 +52,7 @@ type Paper struct {
 	SourceURL       string   `json:"sourceUrl"`
 	DurationMinutes int      `json:"durationMinutes"`
 	MaxMarks        int      `json:"maxMarks"`
+	HeldOn          *string  `json:"heldOn,omitempty"`
 }
 
 type MockItem struct {
