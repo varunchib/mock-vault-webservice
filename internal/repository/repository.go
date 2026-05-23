@@ -102,9 +102,9 @@ func (r *PostgresRepository) GetExamBySlug(ctx context.Context, slug string) (mo
 
 func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks, held_on::text
 		FROM vaultcore.papers
-		ORDER BY exam_name, year DESC, title
+		ORDER BY exam_name, held_on DESC NULLS LAST, year DESC, title
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list papers: %w", err)
@@ -124,10 +124,10 @@ func (r *PostgresRepository) ListPapers(ctx context.Context) ([]models.Paper, er
 
 func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug string) ([]models.Paper, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks, held_on::text
 		FROM vaultcore.papers
 		WHERE exam_slug = $1
-		ORDER BY year DESC, title
+		ORDER BY held_on DESC NULLS LAST, year DESC, title
 	`, examSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list papers by exam: %w", err)
@@ -147,7 +147,7 @@ func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug stri
 
 func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (models.Paper, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks
+		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks, held_on::text
 		FROM vaultcore.papers
 		WHERE slug = $1
 	`, slug)
@@ -844,6 +844,7 @@ func scanExam(row rowScanner) (models.Exam, error) {
 func scanPaper(row rowScanner) (models.Paper, error) {
 	var paper models.Paper
 	var subjectsRaw []byte
+	var heldOn sql.NullString
 
 	if err := row.Scan(
 		&paper.Slug,
@@ -859,12 +860,16 @@ func scanPaper(row rowScanner) (models.Paper, error) {
 		&paper.SourceURL,
 		&paper.DurationMinutes,
 		&paper.MaxMarks,
+		&heldOn,
 	); err != nil {
 		return models.Paper{}, err
 	}
 
 	if err := json.Unmarshal(subjectsRaw, &paper.Subjects); err != nil {
 		return models.Paper{}, fmt.Errorf("scan paper subjects: %w", err)
+	}
+	if heldOn.Valid {
+		paper.HeldOn = &heldOn.String
 	}
 	return paper, nil
 }
