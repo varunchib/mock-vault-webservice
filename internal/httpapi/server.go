@@ -57,6 +57,40 @@ type authResponse struct {
 	User models.User `json:"user"`
 }
 
+// liveAttemptState is the per-user per-paper state stored in Redis during an active attempt.
+type liveAttemptState struct {
+	AttemptID        string            `json:"attemptId"`
+	PaperSlug        string            `json:"paperSlug"`
+	ExamSlug         string            `json:"examSlug"`
+	PaperTitle       string            `json:"paperTitle"`
+	ExamName         string            `json:"examName"`
+	TotalQuestions   int               `json:"totalQuestions"`
+	Answers          map[string]string `json:"answers"`
+	Marked           map[string]bool   `json:"marked"`
+	CurrentIndex     int               `json:"currentIndex"`
+	RemainingSeconds int               `json:"remainingSeconds"`
+	StartedAt        time.Time         `json:"startedAt"`
+	Resumed          bool              `json:"resumed"`
+}
+
+type activeAttemptInfo struct {
+	PaperSlug        string    `json:"paperSlug"`
+	ExamSlug         string    `json:"examSlug"`
+	PaperTitle       string    `json:"paperTitle"`
+	ExamName         string    `json:"examName"`
+	TotalQuestions   int       `json:"totalQuestions"`
+	AnsweredCount    int       `json:"answeredCount"`
+	CurrentIndex     int       `json:"currentIndex"`
+	RemainingSeconds int       `json:"remainingSeconds"`
+	StartedAt        time.Time `json:"startedAt"`
+}
+
+const liveAttemptTTL = 24 * time.Hour
+
+func liveAttemptRedisKey(userID, paperSlug string) string {
+	return "live:attempt:" + userID + ":" + paperSlug
+}
+
 func NewServer(cfg config.Config, repo *repository.PostgresRepository, authService *auth.Service, rdb *redis.Client) *Server {
 	server := &Server{
 		cfg:  cfg,
@@ -203,6 +237,10 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("DELETE /api/v1/activity/enroll", s.withAuth(http.HandlerFunc(s.handleUnenroll), false))
 	s.mux.Handle("GET /api/v1/user/enrolled-slugs", s.withAuth(http.HandlerFunc(s.handleEnrolledSlugs), false))
 	s.mux.Handle("POST /api/v1/activity/attempt", s.withAuth(http.HandlerFunc(s.handleRecordAttempt), false))
+	s.mux.Handle("POST /api/v1/activity/attempt/start", s.withAuth(http.HandlerFunc(s.handleStartLiveAttempt), false))
+	s.mux.Handle("PUT /api/v1/activity/attempt/sync", s.withAuth(http.HandlerFunc(s.handleSyncLiveAttempt), false))
+	s.mux.Handle("GET /api/v1/activity/attempt/active", s.withAuth(http.HandlerFunc(s.handleGetActiveLiveAttempts), false))
+	s.mux.Handle("POST /api/v1/activity/attempt/submit", s.withAuth(http.HandlerFunc(s.handleSubmitLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/admin/summary", s.withAuth(http.HandlerFunc(s.handleAdminSummary), true))
 	s.mux.Handle("POST /api/v1/admin/exams", s.withAuth(http.HandlerFunc(s.handleCreateExam), true))
 	s.mux.Handle("DELETE /api/v1/admin/exams/{slug}", s.withAuth(http.HandlerFunc(s.handleDeleteExam), true))
@@ -1175,4 +1213,200 @@ func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClearReports(w http.ResponseWriter, r *http.Request) {
 	s.rdb.Del(r.Context(), reportListKey)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Reports cleared"})
+}
+
+// ── Live attempt handlers ──────────────────────────────────────────────────────
+
+func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req struct {
+		PaperSlug       string `json:"paperSlug"`
+		ExamSlug        string `json:"examSlug"`
+		PaperTitle      string `json:"paperTitle"`
+		ExamName        string `json:"examName"`
+		TotalQuestions  int    `json:"totalQuestions"`
+		DurationSeconds int    `json:"durationSeconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.PaperSlug = strings.TrimSpace(req.PaperSlug)
+	req.ExamSlug = strings.TrimSpace(req.ExamSlug)
+	if req.PaperSlug == "" || req.ExamSlug == "" {
+		s.respondError(w, http.StatusBadRequest, "paperSlug and examSlug are required")
+		return
+	}
+	if req.DurationSeconds <= 0 {
+		req.DurationSeconds = 120 * 60
+	}
+
+	// Resume if Redis has an existing state for this user+paper
+	if s.rdb != nil {
+		key := liveAttemptRedisKey(user.ID, req.PaperSlug)
+		raw, err := s.rdb.Get(r.Context(), key).Bytes()
+		if err == nil {
+			var state liveAttemptState
+			if json.Unmarshal(raw, &state) == nil {
+				s.rdb.Expire(r.Context(), key, liveAttemptTTL)
+				state.Resumed = true
+				s.respondJSON(w, http.StatusOK, state)
+				return
+			}
+		}
+	}
+
+	// New attempt: create DB record
+	id := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63())
+	if err := s.repo.RecordAttempt(r.Context(), id, user.ID, req.ExamSlug, "", req.PaperSlug); err != nil {
+		s.respondRepositoryError(w, err)
+		return
+	}
+
+	state := liveAttemptState{
+		AttemptID:        id,
+		PaperSlug:        req.PaperSlug,
+		ExamSlug:         req.ExamSlug,
+		PaperTitle:       req.PaperTitle,
+		ExamName:         req.ExamName,
+		TotalQuestions:   req.TotalQuestions,
+		Answers:          map[string]string{},
+		Marked:           map[string]bool{},
+		CurrentIndex:     0,
+		RemainingSeconds: req.DurationSeconds,
+		StartedAt:        time.Now().UTC(),
+		Resumed:          false,
+	}
+
+	if s.rdb != nil {
+		data, _ := json.Marshal(state)
+		s.rdb.Set(r.Context(), liveAttemptRedisKey(user.ID, req.PaperSlug), data, liveAttemptTTL)
+	}
+
+	s.respondJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req struct {
+		PaperSlug        string            `json:"paperSlug"`
+		Answers          map[string]string `json:"answers"`
+		Marked           map[string]bool   `json:"marked"`
+		CurrentIndex     int               `json:"currentIndex"`
+		RemainingSeconds int               `json:"remainingSeconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.PaperSlug == "" {
+		s.respondError(w, http.StatusBadRequest, "paperSlug is required")
+		return
+	}
+
+	if s.rdb != nil {
+		key := liveAttemptRedisKey(user.ID, req.PaperSlug)
+		raw, err := s.rdb.Get(r.Context(), key).Bytes()
+		if err == nil {
+			var state liveAttemptState
+			if json.Unmarshal(raw, &state) == nil {
+				state.Answers = req.Answers
+				state.Marked = req.Marked
+				state.CurrentIndex = req.CurrentIndex
+				state.RemainingSeconds = req.RemainingSeconds
+				if data, merr := json.Marshal(state); merr == nil {
+					s.rdb.Set(r.Context(), key, data, liveAttemptTTL)
+				}
+			}
+		}
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	attempts := make([]activeAttemptInfo, 0)
+
+	if s.rdb != nil {
+		keys, err := s.rdb.Keys(r.Context(), "live:attempt:"+user.ID+":*").Result()
+		if err == nil {
+			for _, key := range keys {
+				raw, err := s.rdb.Get(r.Context(), key).Bytes()
+				if err != nil {
+					continue
+				}
+				var state liveAttemptState
+				if json.Unmarshal(raw, &state) != nil {
+					continue
+				}
+				answered := 0
+				for _, v := range state.Answers {
+					if v != "" {
+						answered++
+					}
+				}
+				attempts = append(attempts, activeAttemptInfo{
+					PaperSlug:        state.PaperSlug,
+					ExamSlug:         state.ExamSlug,
+					PaperTitle:       state.PaperTitle,
+					ExamName:         state.ExamName,
+					TotalQuestions:   state.TotalQuestions,
+					AnsweredCount:    answered,
+					CurrentIndex:     state.CurrentIndex,
+					RemainingSeconds: state.RemainingSeconds,
+					StartedAt:        state.StartedAt,
+				})
+			}
+		}
+	}
+
+	s.respondJSON(w, http.StatusOK, attempts)
+}
+
+func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req struct {
+		AttemptID        string            `json:"attemptId"`
+		PaperSlug        string            `json:"paperSlug"`
+		Correct          int               `json:"correct"`
+		Wrong            int               `json:"wrong"`
+		Skipped          int               `json:"skipped"`
+		TimeTakenSeconds int               `json:"timeTakenSeconds"`
+		Answers          map[string]string `json:"answers"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.AttemptID != "" {
+		_ = s.repo.UpdateAttemptResult(r.Context(), req.AttemptID, req.Correct, req.Wrong, req.Skipped, req.TimeTakenSeconds, req.Answers)
+	}
+
+	if s.rdb != nil && req.PaperSlug != "" {
+		s.rdb.Del(r.Context(), liveAttemptRedisKey(user.ID, req.PaperSlug))
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
