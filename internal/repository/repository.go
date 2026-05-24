@@ -1118,6 +1118,30 @@ func (r *PostgresRepository) ListUserRecentAttempts(ctx context.Context, userID 
 	return attempts, rows.Err()
 }
 
+func (r *PostgresRepository) UpdateAttemptResult(ctx context.Context, attemptID string, correct, wrong, skipped, timeTaken int, answers map[string]string) error {
+	answersJSON, err := json.Marshal(answers)
+	if err != nil {
+		return fmt.Errorf("marshal answers: %w", err)
+	}
+	total := correct + wrong + skipped
+	_, err = r.db.ExecContext(ctx, `
+		UPDATE vaultcore.user_attempts
+		SET score              = $1,
+		    total_questions    = $2,
+		    correct_answers    = $3,
+		    wrong_answers      = $4,
+		    skipped_answers    = $5,
+		    time_taken_seconds = $6,
+		    answers            = $7,
+		    completed_at       = CURRENT_TIMESTAMP
+		WHERE id = $8
+	`, correct, total, correct, wrong, skipped, timeTaken, string(answersJSON), attemptID)
+	if err != nil {
+		return fmt.Errorf("update attempt result: %w", err)
+	}
+	return nil
+}
+
 // GetExamCutoffs returns all cutoff sets for an exam, grouped by (stage, year), newest year first.
 func (r *PostgresRepository) GetExamCutoffs(ctx context.Context, examSlug string) ([]models.ExamCutoffSet, error) {
 	rows, err := r.db.QueryContext(ctx, `
