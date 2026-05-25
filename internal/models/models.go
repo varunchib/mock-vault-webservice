@@ -21,21 +21,28 @@ type QuestionOption struct {
 	Text string `json:"text"`
 }
 
+type QuestionTranslation struct {
+	Passage  string   `json:"passage,omitempty"`
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+}
+
 type Question struct {
-	Slug        string           `json:"slug"`
-	ExamSlug    string           `json:"examSlug"`
-	PaperSlug   string           `json:"paperSlug,omitempty"`
-	ExamName    string           `json:"examName"`
-	Year        string           `json:"year"`
-	Paper       string           `json:"paper"`
-	Subject     string           `json:"subject"`
-	QuestionNo  string           `json:"questionNo"`
-	Question    string           `json:"question"`
-	Options     []QuestionOption `json:"options"`
-	AnswerKey   string           `json:"answerKey"`
-	Answer      string           `json:"answer"`
-	Explanation string           `json:"explanation"`
-	Tags        []string         `json:"tags"`
+	Slug         string                         `json:"slug"`
+	ExamSlug     string                         `json:"examSlug"`
+	PaperSlug    string                         `json:"paperSlug,omitempty"`
+	ExamName     string                         `json:"examName"`
+	Year         string                         `json:"year"`
+	Paper        string                         `json:"paper"`
+	Subject      string                         `json:"subject"`
+	QuestionNo   string                         `json:"questionNo"`
+	Question     string                         `json:"question"`
+	Options      []QuestionOption               `json:"options"`
+	AnswerKey    string                         `json:"answerKey"`
+	Answer       string                         `json:"answer"`
+	Explanation  string                         `json:"explanation"`
+	Tags         []string                       `json:"tags"`
+	Translations map[string]QuestionTranslation `json:"translations,omitempty"`
 }
 
 type Paper struct {
