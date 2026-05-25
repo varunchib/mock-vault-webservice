@@ -32,6 +32,10 @@ func main() {
 	for _, file := range []string{
 		filepath.Join("database", "schema.sql"),
 		filepath.Join("database", "seed.sql"),
+		filepath.Join("database", "rsmssb_patwari_2025_aug17_shift1_spz8.sql"),
+		filepath.Join("database", "rsmssb_patwari_2025_aug17_shift1_spz8_q21_q150.sql"),
+		filepath.Join("database", "rsmssb_patwari_2025_aug17_shift1_spz8_passage_fix.sql"),
+		filepath.Join("database", "rsmssb_patwari_2025_aug17_shift1_spz8_diagram_placeholders.sql"),
 	} {
 		if err := execSQLFile(db, file); err != nil {
 			log.Fatal(err)

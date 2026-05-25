@@ -160,7 +160,7 @@ func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (m
 
 func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
 		FROM vaultcore.questions
 		ORDER BY exam_name, year DESC, question_no::INTEGER NULLS LAST, question_no
 	`)
@@ -182,7 +182,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 
 func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
 		FROM vaultcore.questions
 		WHERE exam_slug = $1
 		ORDER BY year DESC, question_no::INTEGER NULLS LAST, question_no
@@ -205,7 +205,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 
 func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
 		ORDER BY question_no::INTEGER NULLS LAST, question_no
@@ -228,7 +228,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 
 func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
 		ORDER BY question_no::INTEGER NULLS LAST, question_no
@@ -251,7 +251,7 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 
 func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string) (models.Question, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
 		FROM vaultcore.questions
 		WHERE slug = $1
 	`, slug)
@@ -878,6 +878,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 	var question models.Question
 	var optionsRaw []byte
 	var tagsRaw []byte
+	var translationsRaw []byte
 
 	if err := row.Scan(
 		&question.Slug,
@@ -894,6 +895,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 		&question.Answer,
 		&question.Explanation,
 		&tagsRaw,
+		&translationsRaw,
 	); err != nil {
 		return models.Question{}, err
 	}
@@ -903,6 +905,11 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 	}
 	if err := json.Unmarshal(tagsRaw, &question.Tags); err != nil {
 		return models.Question{}, fmt.Errorf("scan question tags: %w", err)
+	}
+	if len(translationsRaw) > 0 && string(translationsRaw) != "{}" {
+		if err := json.Unmarshal(translationsRaw, &question.Translations); err != nil {
+			return models.Question{}, fmt.Errorf("scan question translations: %w", err)
+		}
 	}
 	return question, nil
 }
