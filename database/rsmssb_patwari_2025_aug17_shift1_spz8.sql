@@ -13,15 +13,15 @@ INSERT INTO vaultcore.exams (
   description, popular_years, subjects
 )
 VALUES (
-  'rsmssb',
-  'Rajasthan Staff Selection Board Exams',
-  'RSMSSB',
+  'rssb',
+  'Rajasthan Staff Selection Board',
+  'RSSB',
   'States',
   '📋',
   150,
   1,
   0,
-  'Rajasthan Staff Selection Board previous year papers including Patwari, CET, Junior Assistant, VDO and other state recruitment exams with bilingual Hindi-English practice.',
+  'Rajasthan Staff Selection Board (RSSB) conducts competitive examinations for recruitment to non-gazetted posts in Rajasthan government departments, including Patwari, Junior Assistant, VDO, CET, and other grade-III state service posts.',
   '["2025"]'::jsonb,
   '["Reasoning","Quantitative Aptitude","Computer Awareness","Rajasthan GK","Indian Polity","Indian History","Geography","Science","English Language","Hindi Language"]'::jsonb
 )

@@ -1215,6 +1215,79 @@ func (r *PostgresRepository) UpsertExamCutoff(ctx context.Context, examSlug, sta
 }
 
 // GetNextAttemptNumber returns how many times a user has attempted a paper/mock and what their next attempt number is.
+type LeaderboardEntry struct {
+	Rank     int    `json:"rank"`
+	UserID   string `json:"userId"`
+	Name     string `json:"name"`
+	ScorePct int    `json:"scorePct"`
+	IsMe     bool   `json:"isMe"`
+}
+
+// GetExamLeaderboard returns the top-10 performers for an exam (by best score ratio)
+// and the requesting user's rank. UserID may be empty to skip user-rank lookup.
+func (r *PostgresRepository) GetExamLeaderboard(ctx context.Context, examSlug, userID string) ([]LeaderboardEntry, int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		WITH best AS (
+			SELECT ua.user_id,
+			       u.name,
+			       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+			FROM vaultcore.user_attempts ua
+			JOIN vaultcore.users u ON u.id = ua.user_id
+			WHERE ua.exam_slug = $1
+			  AND ua.total_questions > 0
+			  AND ua.correct_answers > 0
+			GROUP BY ua.user_id, u.name
+		),
+		ranked AS (
+			SELECT *, DENSE_RANK() OVER (ORDER BY ratio DESC) AS rank
+			FROM best
+		)
+		SELECT rank, user_id, name, ROUND(ratio * 100)::int
+		FROM ranked
+		ORDER BY rank, name
+		LIMIT 10
+	`, examSlug)
+	if err != nil {
+		return nil, -1, fmt.Errorf("leaderboard top10: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LeaderboardEntry
+	for rows.Next() {
+		var e LeaderboardEntry
+		if err := rows.Scan(&e.Rank, &e.UserID, &e.Name, &e.ScorePct); err != nil {
+			return nil, -1, err
+		}
+		e.IsMe = userID != "" && e.UserID == userID
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, -1, err
+	}
+
+	userRank := -1
+	if userID != "" {
+		r.db.QueryRowContext(ctx, `
+			WITH best AS (
+				SELECT ua.user_id,
+				       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+				FROM vaultcore.user_attempts ua
+				WHERE ua.exam_slug = $1
+				  AND ua.total_questions > 0
+				  AND ua.correct_answers > 0
+				GROUP BY ua.user_id
+			),
+			ranked AS (
+				SELECT user_id, DENSE_RANK() OVER (ORDER BY ratio DESC) AS rank
+				FROM best
+			)
+			SELECT rank FROM ranked WHERE user_id = $2
+		`, examSlug, userID).Scan(&userRank)
+	}
+
+	return entries, userRank, nil
+}
+
 func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, examSlug, mockSlug, paperSlug string) (int, error) {
 	var count int
 	var err error

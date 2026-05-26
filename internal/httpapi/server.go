@@ -20,7 +20,7 @@ import (
 	"mock-vault-webservice/internal/auth"
 	"mock-vault-webservice/internal/config"
 	"mock-vault-webservice/internal/models"
-	"mock-vault-webservice/internal/repository"
+	"mock-vault-webservice/internal/repository" //nolint:depguard
 )
 
 const (
@@ -58,19 +58,21 @@ type authResponse struct {
 }
 
 // liveAttemptState is the per-user per-paper state stored in Redis during an active attempt.
+// ExpiresAt is the authoritative deadline — set once at creation, never updated by sync calls.
+// RemainingSeconds is NOT stored; it is computed as max(0, ExpiresAt - now) on every read.
 type liveAttemptState struct {
-	AttemptID        string            `json:"attemptId"`
-	PaperSlug        string            `json:"paperSlug"`
-	ExamSlug         string            `json:"examSlug"`
-	PaperTitle       string            `json:"paperTitle"`
-	ExamName         string            `json:"examName"`
-	TotalQuestions   int               `json:"totalQuestions"`
-	Answers          map[string]string `json:"answers"`
-	Marked           map[string]bool   `json:"marked"`
-	CurrentIndex     int               `json:"currentIndex"`
-	RemainingSeconds int               `json:"remainingSeconds"`
-	StartedAt        time.Time         `json:"startedAt"`
-	Resumed          bool              `json:"resumed"`
+	AttemptID      string            `json:"attemptId"`
+	PaperSlug      string            `json:"paperSlug"`
+	ExamSlug       string            `json:"examSlug"`
+	PaperTitle     string            `json:"paperTitle"`
+	ExamName       string            `json:"examName"`
+	TotalQuestions int               `json:"totalQuestions"`
+	Answers        map[string]string `json:"answers"`
+	Marked         map[string]bool   `json:"marked"`
+	CurrentIndex   int               `json:"currentIndex"`
+	ExpiresAt      time.Time         `json:"expiresAt"`
+	StartedAt      time.Time         `json:"startedAt"`
+	Resumed        bool              `json:"resumed"`
 }
 
 type activeAttemptInfo struct {
@@ -100,6 +102,7 @@ func NewServer(cfg config.Config, repo *repository.PostgresRepository, authServi
 		mux:  http.NewServeMux(),
 	}
 	server.registerRoutes()
+	server.startLiveAttemptExpiry()
 	return server
 }
 
@@ -241,6 +244,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("PUT /api/v1/activity/attempt/sync", s.withAuth(http.HandlerFunc(s.handleSyncLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/activity/attempt/active", s.withAuth(http.HandlerFunc(s.handleGetActiveLiveAttempts), false))
 	s.mux.Handle("POST /api/v1/activity/attempt/submit", s.withAuth(http.HandlerFunc(s.handleSubmitLiveAttempt), false))
+	s.mux.Handle("GET /api/v1/analytics/leaderboard", s.withAuth(http.HandlerFunc(s.handleExamLeaderboard), false))
 	s.mux.Handle("GET /api/v1/admin/summary", s.withAuth(http.HandlerFunc(s.handleAdminSummary), true))
 	s.mux.Handle("POST /api/v1/admin/exams", s.withAuth(http.HandlerFunc(s.handleCreateExam), true))
 	s.mux.Handle("DELETE /api/v1/admin/exams/{slug}", s.withAuth(http.HandlerFunc(s.handleDeleteExam), true))
@@ -1108,7 +1112,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Add("Vary", "Origin")
 		}
 
@@ -1255,7 +1259,17 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 			if json.Unmarshal(raw, &state) == nil {
 				s.rdb.Expire(r.Context(), key, liveAttemptTTL)
 				state.Resumed = true
-				s.respondJSON(w, http.StatusOK, state)
+				remaining := 0
+				if !state.ExpiresAt.IsZero() {
+					remaining = int(time.Until(state.ExpiresAt).Seconds())
+					if remaining < 0 {
+						remaining = 0
+					}
+				}
+				s.respondJSON(w, http.StatusOK, struct {
+					liveAttemptState
+					RemainingSeconds int `json:"remainingSeconds"`
+				}{state, remaining})
 				return
 			}
 		}
@@ -1268,19 +1282,20 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	now := time.Now().UTC()
 	state := liveAttemptState{
-		AttemptID:        id,
-		PaperSlug:        req.PaperSlug,
-		ExamSlug:         req.ExamSlug,
-		PaperTitle:       req.PaperTitle,
-		ExamName:         req.ExamName,
-		TotalQuestions:   req.TotalQuestions,
-		Answers:          map[string]string{},
-		Marked:           map[string]bool{},
-		CurrentIndex:     0,
-		RemainingSeconds: req.DurationSeconds,
-		StartedAt:        time.Now().UTC(),
-		Resumed:          false,
+		AttemptID:      id,
+		PaperSlug:      req.PaperSlug,
+		ExamSlug:       req.ExamSlug,
+		PaperTitle:     req.PaperTitle,
+		ExamName:       req.ExamName,
+		TotalQuestions: req.TotalQuestions,
+		Answers:        map[string]string{},
+		Marked:         map[string]bool{},
+		CurrentIndex:   0,
+		ExpiresAt:      now.Add(time.Duration(req.DurationSeconds) * time.Second),
+		StartedAt:      now,
+		Resumed:        false,
 	}
 
 	if s.rdb != nil {
@@ -1288,7 +1303,10 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 		s.rdb.Set(r.Context(), liveAttemptRedisKey(user.ID, req.PaperSlug), data, liveAttemptTTL)
 	}
 
-	s.respondJSON(w, http.StatusOK, state)
+	s.respondJSON(w, http.StatusOK, struct {
+		liveAttemptState
+		RemainingSeconds int `json:"remainingSeconds"`
+	}{state, req.DurationSeconds})
 }
 
 func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
@@ -1299,11 +1317,11 @@ func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		PaperSlug        string            `json:"paperSlug"`
-		Answers          map[string]string `json:"answers"`
-		Marked           map[string]bool   `json:"marked"`
-		CurrentIndex     int               `json:"currentIndex"`
-		RemainingSeconds int               `json:"remainingSeconds"`
+		PaperSlug    string            `json:"paperSlug"`
+		Answers      map[string]string `json:"answers"`
+		Marked       map[string]bool   `json:"marked"`
+		CurrentIndex int               `json:"currentIndex"`
+		// RemainingSeconds is accepted for backward compat but ignored — ExpiresAt is authoritative.
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
@@ -1323,7 +1341,6 @@ func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
 				state.Answers = req.Answers
 				state.Marked = req.Marked
 				state.CurrentIndex = req.CurrentIndex
-				state.RemainingSeconds = req.RemainingSeconds
 				if data, merr := json.Marshal(state); merr == nil {
 					s.rdb.Set(r.Context(), key, data, liveAttemptTTL)
 				}
@@ -1355,6 +1372,17 @@ func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Requ
 				if json.Unmarshal(raw, &state) != nil {
 					continue
 				}
+				remaining := 0
+				if !state.ExpiresAt.IsZero() {
+					remaining = int(time.Until(state.ExpiresAt).Seconds())
+					if remaining < 0 {
+						remaining = 0
+					}
+				}
+				// Skip attempts that have already expired (background worker will submit them)
+				if !state.ExpiresAt.IsZero() && time.Now().After(state.ExpiresAt) {
+					continue
+				}
 				answered := 0
 				for _, v := range state.Answers {
 					if v != "" {
@@ -1369,7 +1397,7 @@ func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Requ
 					TotalQuestions:   state.TotalQuestions,
 					AnsweredCount:    answered,
 					CurrentIndex:     state.CurrentIndex,
-					RemainingSeconds: state.RemainingSeconds,
+					RemainingSeconds: remaining,
 					StartedAt:        state.StartedAt,
 				})
 			}
@@ -1409,4 +1437,93 @@ func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ── Live attempt expiry worker ─────────────────────────────────────────────────
+
+// startLiveAttemptExpiry launches a background goroutine that auto-submits
+// any live attempt whose ExpiresAt has passed.
+func (s *Server) startLiveAttemptExpiry() {
+	if s.rdb == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.expireOverdueLiveAttempts()
+		}
+	}()
+}
+
+func (s *Server) expireOverdueLiveAttempts() {
+	ctx := context.Background()
+	keys, err := s.rdb.Keys(ctx, "live:attempt:*").Result()
+	if err != nil {
+		return
+	}
+	for _, key := range keys {
+		raw, err := s.rdb.Get(ctx, key).Bytes()
+		if err != nil {
+			continue
+		}
+		var state liveAttemptState
+		if json.Unmarshal(raw, &state) != nil {
+			continue
+		}
+		if !state.ExpiresAt.IsZero() && time.Now().After(state.ExpiresAt) {
+			s.autoSubmitLiveAttempt(ctx, key, &state)
+		}
+	}
+}
+
+func (s *Server) autoSubmitLiveAttempt(ctx context.Context, redisKey string, state *liveAttemptState) {
+	questions, err := s.repo.ListQuestionsByPaper(ctx, state.PaperSlug)
+	if err != nil || len(questions) == 0 {
+		s.rdb.Del(ctx, redisKey)
+		return
+	}
+	correct, wrong, skipped := 0, 0, 0
+	for _, q := range questions {
+		ans := state.Answers[q.Slug]
+		if ans == "" {
+			skipped++
+		} else if ans == q.AnswerKey {
+			correct++
+		} else {
+			wrong++
+		}
+	}
+	timeTaken := int(time.Since(state.StartedAt).Seconds())
+	if state.AttemptID != "" {
+		_ = s.repo.UpdateAttemptResult(ctx, state.AttemptID, correct, wrong, skipped, timeTaken, state.Answers)
+	}
+	s.rdb.Del(ctx, redisKey)
+}
+
+// ── Analytics leaderboard ──────────────────────────────────────────────────
+
+func (s *Server) handleExamLeaderboard(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	examSlug := strings.TrimSpace(r.URL.Query().Get("examSlug"))
+	if examSlug == "" {
+		s.respondError(w, http.StatusBadRequest, "examSlug is required")
+		return
+	}
+	top10, userRank, err := s.repo.GetExamLeaderboard(r.Context(), examSlug, user.ID)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch leaderboard")
+		return
+	}
+	if top10 == nil {
+		top10 = []repository.LeaderboardEntry{}
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{
+		"top10":    top10,
+		"userRank": userRank,
+	})
 }
