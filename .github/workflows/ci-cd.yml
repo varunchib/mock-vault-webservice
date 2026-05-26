@@ -52,6 +52,9 @@ jobs:
             echo "==> swapping backend"
             docker compose up -d --no-deps webservice
 
+            echo "==> reloading nginx config"
+            docker compose exec -T nginx nginx -s reload
+
             echo "==> cleaning old images"
             docker image prune -f
 

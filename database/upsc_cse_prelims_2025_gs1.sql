@@ -10,7 +10,7 @@ VALUES (
   '["History","Geography","Environment & Ecology","Economy","Polity & Governance","Science & Technology","Current Affairs"]'::jsonb,
   '🏛️',
   'UPSC CSE',
-  'UPSC Civil Services Examination (Prelims & Mains) — the gateway to IAS, IPS, IFS and other Group A & B services.',
+  'Union Public Service Commission Civil Services Examination (UPSC CSE) is conducted in three stages (Prelims, Mains, and Interview) to select candidates for IAS, IPS, IFS, and other Group A central services.',
   0, 0, 0,
   '["2025"]'::jsonb
 )

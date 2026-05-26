@@ -14,7 +14,7 @@ VALUES (
   'Central',
   '🏛️',
   0, 1, 0,
-  'UPSC Civil Services Examination (CSE) selects candidates for IAS, IFS, IPS and other Central Services. The Preliminary examination tests General Studies and CSAT.',
+  'Union Public Service Commission Civil Services Examination (UPSC CSE) is conducted in three stages (Prelims, Mains, and Interview) to select candidates for IAS, IPS, IFS, and other Group A central services.',
   '["2026","2025","2024","2023","2022"]'::jsonb,
   '["History","Art & Culture","Geography","Environment & Ecology","Economy","Indian Polity","Science & Technology","International Relations","Ethics","Defense & Security"]'::jsonb
 )
