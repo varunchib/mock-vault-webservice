@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -31,17 +33,19 @@ func Run() error {
 	defer db.Close()
 
 	db.SetConnMaxLifetime(30 * time.Minute)
-	db.SetMaxIdleConns(5)
-	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(25)
+	db.SetMaxOpenConns(100)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := db.PingContext(pingCtx); err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
-	rdb, err := connectRedis(ctx, cfg)
+	redisCtx, redisCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer redisCancel()
+
+	rdb, err := connectRedis(redisCtx, cfg)
 	if err != nil {
 		log.Printf("redis unavailable, continuing without cache: %v", err)
 		rdb = nil
@@ -54,17 +58,37 @@ func Run() error {
 	authService := auth.NewService(cfg, repo, rdb)
 	apiServer := httpapi.NewServer(cfg, repo, authService, rdb)
 
-	server := &http.Server{
+	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("server listening on %s", cfg.HTTPAddr)
-	return server.ListenAndServe()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("server listening on %s", cfg.HTTPAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutdown signal received")
+
+	apiServer.Shutdown()
+
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutCancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		return fmt.Errorf("server shutdown: %w", err)
+	}
+	log.Println("server stopped cleanly")
+	return nil
 }
 
 func connectRedis(ctx context.Context, cfg config.Config) (*redis.Client, error) {

@@ -8,9 +8,9 @@ type Exam struct {
 	ShortName      string   `json:"shortName"`
 	Category       string   `json:"category"`
 	Icon           string   `json:"icon"`
-	TotalQuestions string   `json:"totalQuestions"`
-	Papers         string   `json:"papers"`
-	Mocks          string   `json:"mocks"`
+	TotalQuestions int      `json:"totalQuestions"`
+	Papers         int      `json:"papers"`
+	Mocks          int      `json:"mocks"`
 	Description    string   `json:"description"`
 	PopularYears   []string `json:"popularYears"`
 	Subjects       []string `json:"subjects"`

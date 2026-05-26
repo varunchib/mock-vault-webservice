@@ -208,3 +208,20 @@ CREATE INDEX IF NOT EXISTS idx_user_attempts_paper_slug ON vaultcore.user_attemp
 CREATE INDEX IF NOT EXISTS idx_user_attempts_exam_slug  ON vaultcore.user_attempts(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_user_attempts_completed_at ON vaultcore.user_attempts(completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_exam_cutoffs_exam_slug   ON vaultcore.exam_cutoffs(exam_slug);
+
+-- Composite index for leaderboard and analytics queries (user_id + exam_slug together)
+CREATE INDEX IF NOT EXISTS idx_user_attempts_user_exam  ON vaultcore.user_attempts(user_id, exam_slug);
+
+-- FK on exam_slug to enforce referential integrity (was missing)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'user_attempts_exam_slug_fkey'
+      AND connamespace = 'vaultcore'::regnamespace
+  ) THEN
+    ALTER TABLE vaultcore.user_attempts
+      ADD CONSTRAINT user_attempts_exam_slug_fkey
+      FOREIGN KEY (exam_slug) REFERENCES vaultcore.exams(slug) ON DELETE CASCADE;
+  END IF;
+END $$;
