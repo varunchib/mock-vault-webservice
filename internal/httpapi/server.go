@@ -2,15 +2,17 @@ package httpapi
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 
@@ -33,12 +35,13 @@ type ctxKey string
 const authUserKey ctxKey = "auth_user"
 
 type Server struct {
-	cfg  config.Config
-	repo *repository.PostgresRepository
-	auth *auth.Service
-	rdb  *redis.Client
-	mux  *http.ServeMux
-	sfg  singleflight.Group // cache stampede protection
+	cfg    config.Config
+	repo   *repository.PostgresRepository
+	auth   *auth.Service
+	rdb    *redis.Client
+	mux    *http.ServeMux
+	sfg    singleflight.Group // cache stampede protection
+	stopCh chan struct{}
 }
 
 // discardWriter absorbs writes inside singleflight closures (data-only handlers)
@@ -95,20 +98,37 @@ func liveAttemptRedisKey(userID, paperSlug string) string {
 
 func NewServer(cfg config.Config, repo *repository.PostgresRepository, authService *auth.Service, rdb *redis.Client) *Server {
 	server := &Server{
-		cfg:  cfg,
-		repo: repo,
-		auth: authService,
-		rdb:  rdb,
-		mux:  http.NewServeMux(),
+		cfg:    cfg,
+		repo:   repo,
+		auth:   authService,
+		rdb:    rdb,
+		mux:    http.NewServeMux(),
+		stopCh: make(chan struct{}),
 	}
 	server.registerRoutes()
 	server.startLiveAttemptExpiry()
 	return server
 }
 
+// Shutdown signals background goroutines to stop. Call before http.Server.Shutdown.
+func (s *Server) Shutdown() {
+	close(s.stopCh)
+}
+
 func (s *Server) Handler() http.Handler {
-	// Global: 300 req/min per IP — protects DB and Redis from traffic spikes
-	return s.securityHeaders(s.cors(s.withRateLimit("global", 300, time.Minute, s.mux)))
+	return s.securityHeaders(s.cors(s.withRateLimit("global", 300, time.Minute, s.limitRequestBody(s.mux))))
+}
+
+// limitRequestBody caps non-GET/HEAD/OPTIONS request bodies at 32 MB to prevent OOM attacks.
+func (s *Server) limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // realIP extracts the leftmost non-proxy IP from forwarding headers.
@@ -447,25 +467,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exams, err := s.repo.ListExams(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	mocks, err := s.repo.ListMocks(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	enrolledExams, err := s.repo.ListUserEnrollments(r.Context(), user.ID)
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	recentAttempts, err := s.repo.ListUserRecentAttempts(r.Context(), user.ID, 8)
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
+	var (
+		exams          []models.Exam
+		mocks          []models.MockItem
+		enrolledExams  []models.Exam
+		recentAttempts []models.RecentAttempt
+		errs           [4]error
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); exams, errs[0] = s.repo.ListExams(r.Context()) }()
+	go func() { defer wg.Done(); mocks, errs[1] = s.repo.ListMocks(r.Context()) }()
+	go func() { defer wg.Done(); enrolledExams, errs[2] = s.repo.ListUserEnrollments(r.Context(), user.ID) }()
+	go func() { defer wg.Done(); recentAttempts, errs[3] = s.repo.ListUserRecentAttempts(r.Context(), user.ID, 8) }()
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			s.respondRepositoryError(w, err)
+			return
+		}
 	}
 	if exams == nil {
 		exams = []models.Exam{}
@@ -479,7 +500,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if recentAttempts == nil {
 		recentAttempts = []models.RecentAttempt{}
 	}
-
 	s.respondJSON(w, http.StatusOK, models.Dashboard{
 		User:           user,
 		Exams:          exams,
@@ -590,7 +610,7 @@ func (s *Server) handleRecordAttempt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63())
+	id := newAttemptID()
 	if err := s.repo.RecordAttempt(r.Context(), id, user.ID, req.ExamSlug, req.MockSlug, req.PaperSlug); err != nil {
 		s.respondRepositoryError(w, err)
 		return
@@ -599,37 +619,34 @@ func (s *Server) handleRecordAttempt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminSummary(w http.ResponseWriter, r *http.Request) {
-	exams, err := s.repo.ListExams(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	papers, err := s.repo.ListPapers(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	mocks, err := s.repo.ListMocks(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	questions, err := s.repo.ListQuestions(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
-	userCount, err := s.repo.CountUsers(r.Context())
-	if err != nil {
-		s.respondRepositoryError(w, err)
-		return
-	}
+	var (
+		exams         []models.Exam
+		paperCount    int
+		mockCount     int
+		questionCount int
+		userCount     int
+		errs          [5]error
+	)
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() { defer wg.Done(); exams, errs[0] = s.repo.ListExams(r.Context()) }()
+	go func() { defer wg.Done(); paperCount, errs[1] = s.repo.CountPapers(r.Context()) }()
+	go func() { defer wg.Done(); mockCount, errs[2] = s.repo.CountMocks(r.Context()) }()
+	go func() { defer wg.Done(); questionCount, errs[3] = s.repo.CountQuestions(r.Context()) }()
+	go func() { defer wg.Done(); userCount, errs[4] = s.repo.CountUsers(r.Context()) }()
+	wg.Wait()
 
+	for _, err := range errs {
+		if err != nil {
+			s.respondRepositoryError(w, err)
+			return
+		}
+	}
 	s.respondJSON(w, http.StatusOK, map[string]any{
 		"exams":         exams,
-		"paperCount":    len(papers),
-		"mockCount":     len(mocks),
-		"questionCount": len(questions),
+		"paperCount":    paperCount,
+		"mockCount":     mockCount,
+		"questionCount": questionCount,
 		"userCount":     userCount,
 	})
 }
@@ -702,7 +719,8 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusBadRequest, "question text is required")
 		return
 	}
-	if len(cleanOptions(req.Options)) < 2 {
+	opts := cleanOptions(req.Options)
+	if len(opts) < 2 {
 		s.respondError(w, http.StatusBadRequest, "at least two options are required")
 		return
 	}
@@ -715,7 +733,7 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	input := repository.UpdateQuestionInput{
 		Question:    req.Question,
-		Options:     cleanOptions(req.Options),
+		Options:     opts,
 		AnswerKey:   req.AnswerKey,
 		Explanation: req.Explanation,
 		Subject:     req.Subject,
@@ -873,9 +891,11 @@ func (s *Server) cachedPublicKey(ttl time.Duration, makeKey func(*http.Request) 
 		// 2. Cache miss — use singleflight to prevent stampede:
 		//    concurrent requests for the same key share a single DB call.
 		val, err, _ := s.sfg.Do("fetch:"+cacheKey, func() (interface{}, error) {
-			// Use a background context so one cancelled request doesn't abort
-			// in-flight work that other goroutines are waiting on.
-			payload, herr := handler(newDiscardWriter(), r.WithContext(context.Background()))
+			// Detached timeout context: not tied to any single request so a
+			// cancellation from one caller doesn't abort work others are waiting on.
+			fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer fetchCancel()
+			payload, herr := handler(newDiscardWriter(), r.WithContext(fetchCtx))
 			if herr != nil {
 				return nil, herr
 			}
@@ -1137,16 +1157,16 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 func sessionMetadataFromRequest(r *http.Request) auth.SessionMetadata {
 	return auth.SessionMetadata{
 		UserAgent: strings.TrimSpace(r.UserAgent()),
-		IPAddress: requestIP(r),
+		IPAddress: realIP(r),
 	}
 }
 
-func requestIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+func newAttemptID() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand unavailable: %v", err))
 	}
-	return host
+	return hex.EncodeToString(b)
 }
 
 func sameSiteMode(value string) http.SameSite {
@@ -1197,7 +1217,11 @@ func (s *Server) handleSubmitReport(w http.ResponseWriter, r *http.Request) {
 		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 	}
 	data, _ := json.Marshal(entry)
-	s.rdb.RPush(r.Context(), reportListKey, string(data))
+	if err := s.rdb.RPush(r.Context(), reportListKey, string(data)).Err(); err != nil {
+		log.Printf("submit report: rpush: %v", err)
+		s.respondError(w, http.StatusInternalServerError, "Failed to submit report")
+		return
+	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Report submitted"})
 }
 
@@ -1215,7 +1239,11 @@ func (s *Server) handleListReports(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClearReports(w http.ResponseWriter, r *http.Request) {
-	s.rdb.Del(r.Context(), reportListKey)
+	if err := s.rdb.Del(r.Context(), reportListKey).Err(); err != nil {
+		log.Printf("clear reports: del: %v", err)
+		s.respondError(w, http.StatusInternalServerError, "Failed to clear reports")
+		return
+	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Reports cleared"})
 }
 
@@ -1276,7 +1304,7 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// New attempt: create DB record
-	id := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63())
+	id := newAttemptID()
 	if err := s.repo.RecordAttempt(r.Context(), id, user.ID, req.ExamSlug, "", req.PaperSlug); err != nil {
 		s.respondRepositoryError(w, err)
 		return
@@ -1361,8 +1389,12 @@ func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Requ
 	attempts := make([]activeAttemptInfo, 0)
 
 	if s.rdb != nil {
-		keys, err := s.rdb.Keys(r.Context(), "live:attempt:"+user.ID+":*").Result()
-		if err == nil {
+		var keys []string
+		iter := s.rdb.Scan(r.Context(), 0, "live:attempt:"+user.ID+":*", 100).Iterator()
+		for iter.Next(r.Context()) {
+			keys = append(keys, iter.Val())
+		}
+		if iter.Err() == nil {
 			for _, key := range keys {
 				raw, err := s.rdb.Get(r.Context(), key).Bytes()
 				if err != nil {
@@ -1429,7 +1461,11 @@ func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request)
 	}
 
 	if req.AttemptID != "" {
-		_ = s.repo.UpdateAttemptResult(r.Context(), req.AttemptID, req.Correct, req.Wrong, req.Skipped, req.TimeTakenSeconds, req.Answers)
+		if err := s.repo.UpdateAttemptResult(r.Context(), req.AttemptID, req.Correct, req.Wrong, req.Skipped, req.TimeTakenSeconds, req.Answers); err != nil {
+			log.Printf("submit attempt: save result for %s: %v", req.AttemptID, err)
+			s.respondError(w, http.StatusInternalServerError, "Failed to save attempt result")
+			return
+		}
 	}
 
 	if s.rdb != nil && req.PaperSlug != "" {
@@ -1450,16 +1486,25 @@ func (s *Server) startLiveAttemptExpiry() {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.expireOverdueLiveAttempts()
+		for {
+			select {
+			case <-ticker.C:
+				s.expireOverdueLiveAttempts()
+			case <-s.stopCh:
+				return
+			}
 		}
 	}()
 }
 
 func (s *Server) expireOverdueLiveAttempts() {
 	ctx := context.Background()
-	keys, err := s.rdb.Keys(ctx, "live:attempt:*").Result()
-	if err != nil {
+	var keys []string
+	iter := s.rdb.Scan(ctx, 0, "live:attempt:*", 100).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if iter.Err() != nil {
 		return
 	}
 	for _, key := range keys {

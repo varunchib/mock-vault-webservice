@@ -62,15 +62,10 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 const examSelectSQL = `
 	SELECT
 	  e.slug, e.name, e.short_name, e.category, e.icon, e.description, e.popular_years,
-	  CAST((SELECT COUNT(*) FROM vaultcore.papers p WHERE p.exam_slug = e.slug) AS text),
-	  CAST((SELECT COALESCE(SUM(p2.questions),0) FROM vaultcore.papers p2 WHERE p2.exam_slug = e.slug) AS text),
-	  CAST((SELECT COUNT(*) FROM vaultcore.mocks m WHERE m.exam_slug = e.slug) AS text),
-	  COALESCE(
-	    (SELECT array_to_json(array_agg(DISTINCT q.subject ORDER BY q.subject))
-	     FROM vaultcore.questions q
-	     WHERE q.exam_slug = e.slug AND q.paper_slug IS NOT NULL AND q.subject != ''),
-	    '[]'::json
-	  )
+	  e.papers,
+	  e.total_questions,
+	  e.mocks,
+	  COALESCE(e.subjects, '[]'::jsonb)
 	FROM vaultcore.exams e`
 
 func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, error) {
@@ -433,6 +428,15 @@ func (r *PostgresRepository) UpsertMockWithQuestions(ctx context.Context, input 
 		}
 	}
 
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vaultcore.exams SET
+			mocks      = (SELECT COUNT(*) FROM vaultcore.mocks WHERE exam_slug = $1),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE slug = $1
+	`, input.ExamSlug); err != nil {
+		return fmt.Errorf("update exam mock count: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit mock transaction: %w", err)
 	}
@@ -440,11 +444,27 @@ func (r *PostgresRepository) UpsertMockWithQuestions(ctx context.Context, input 
 }
 
 func (r *PostgresRepository) DeleteMockBySlug(ctx context.Context, slug string) error {
-	result, err := r.db.ExecContext(ctx, `DELETE FROM vaultcore.mocks WHERE slug = $1`, slug)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("delete mock: %w", err)
+		return fmt.Errorf("begin delete mock transaction: %w", err)
 	}
-	return ensureAffected(result)
+	defer tx.Rollback()
+
+	var examSlug string
+	if err := tx.QueryRowContext(ctx, `DELETE FROM vaultcore.mocks WHERE slug = $1 RETURNING exam_slug`, slug).Scan(&examSlug); err != nil {
+		return mapNotFound(err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vaultcore.exams SET
+			mocks      = (SELECT COUNT(*) FROM vaultcore.mocks WHERE exam_slug = $1),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE slug = $1
+	`, examSlug); err != nil {
+		return fmt.Errorf("update exam mock count after delete: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (r *PostgresRepository) DeletePaperBySlug(ctx context.Context, slug string) error {
@@ -595,8 +615,14 @@ func (r *PostgresRepository) UpsertPaperWithQuestions(ctx context.Context, req m
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE vaultcore.exams SET
-			papers = (SELECT COUNT(*) FROM vaultcore.papers WHERE exam_slug = $1),
+			papers          = (SELECT COUNT(*) FROM vaultcore.papers WHERE exam_slug = $1),
 			total_questions = (SELECT COUNT(*) FROM vaultcore.questions WHERE exam_slug = $1),
+			subjects        = COALESCE(
+				(SELECT to_jsonb(array_agg(DISTINCT q.subject ORDER BY q.subject))
+				 FROM vaultcore.questions q
+				 WHERE q.exam_slug = $1 AND q.paper_slug IS NOT NULL AND q.subject != ''),
+				'[]'::jsonb
+			),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE slug = $1
 	`, req.ExamSlug)
@@ -830,6 +856,10 @@ func scanExam(row rowScanner) (models.Exam, error) {
 		&subjectsRaw,
 	); err != nil {
 		return models.Exam{}, err
+	}
+	// popularYearsRaw may be NULL for old rows
+	if len(popularYearsRaw) == 0 {
+		popularYearsRaw = []byte("[]")
 	}
 
 	if err := json.Unmarshal(popularYearsRaw, &exam.PopularYears); err != nil {
@@ -1225,6 +1255,7 @@ type LeaderboardEntry struct {
 
 // GetExamLeaderboard returns the top-10 performers for an exam (by best score ratio)
 // and the requesting user's rank. UserID may be empty to skip user-rank lookup.
+// Single query: CTE computed once, user rank extracted as scalar subquery.
 func (r *PostgresRepository) GetExamLeaderboard(ctx context.Context, examSlug, userID string) ([]LeaderboardEntry, int, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		WITH best AS (
@@ -1239,50 +1270,37 @@ func (r *PostgresRepository) GetExamLeaderboard(ctx context.Context, examSlug, u
 			GROUP BY ua.user_id, u.name
 		),
 		ranked AS (
-			SELECT *, DENSE_RANK() OVER (ORDER BY ratio DESC) AS rank
+			SELECT user_id, name, ROUND(ratio * 100)::int AS score_pct,
+			       DENSE_RANK() OVER (ORDER BY ratio DESC) AS rnk
 			FROM best
 		)
-		SELECT rank, user_id, name, ROUND(ratio * 100)::int
+		SELECT rnk, user_id, name, score_pct,
+		       (SELECT rnk FROM ranked WHERE ($2 = '' OR user_id = $2) AND $2 != '' LIMIT 1)
 		FROM ranked
-		ORDER BY rank, name
+		ORDER BY rnk, name
 		LIMIT 10
-	`, examSlug)
+	`, examSlug, userID)
 	if err != nil {
-		return nil, -1, fmt.Errorf("leaderboard top10: %w", err)
+		return nil, -1, fmt.Errorf("leaderboard: %w", err)
 	}
 	defer rows.Close()
 
 	var entries []LeaderboardEntry
+	userRank := -1
 	for rows.Next() {
 		var e LeaderboardEntry
-		if err := rows.Scan(&e.Rank, &e.UserID, &e.Name, &e.ScorePct); err != nil {
+		var rankFromRow *int
+		if err := rows.Scan(&e.Rank, &e.UserID, &e.Name, &e.ScorePct, &rankFromRow); err != nil {
 			return nil, -1, err
 		}
 		e.IsMe = userID != "" && e.UserID == userID
 		entries = append(entries, e)
+		if rankFromRow != nil && userRank == -1 {
+			userRank = *rankFromRow
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, -1, err
-	}
-
-	userRank := -1
-	if userID != "" {
-		r.db.QueryRowContext(ctx, `
-			WITH best AS (
-				SELECT ua.user_id,
-				       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
-				FROM vaultcore.user_attempts ua
-				WHERE ua.exam_slug = $1
-				  AND ua.total_questions > 0
-				  AND ua.correct_answers > 0
-				GROUP BY ua.user_id
-			),
-			ranked AS (
-				SELECT user_id, DENSE_RANK() OVER (ORDER BY ratio DESC) AS rank
-				FROM best
-			)
-			SELECT rank FROM ranked WHERE user_id = $2
-		`, examSlug, userID).Scan(&userRank)
 	}
 
 	return entries, userRank, nil
@@ -1306,4 +1324,22 @@ func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, e
 		return 1, fmt.Errorf("get attempt number: %w", err)
 	}
 	return count + 1, nil
+}
+
+func (r *PostgresRepository) CountQuestions(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vaultcore.questions`).Scan(&n)
+	return n, err
+}
+
+func (r *PostgresRepository) CountPapers(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vaultcore.papers`).Scan(&n)
+	return n, err
+}
+
+func (r *PostgresRepository) CountMocks(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vaultcore.mocks`).Scan(&n)
+	return n, err
 }
