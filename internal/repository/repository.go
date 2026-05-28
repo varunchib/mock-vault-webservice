@@ -61,15 +61,15 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 
 const examSelectSQL = `
 	SELECT
-	  e.slug, e.name, e.short_name, e.category, e.icon, e.description, e.popular_years,
-	  e.papers,
-	  e.total_questions,
-	  e.mocks,
-	  COALESCE(e.subjects, '[]'::jsonb)
-	FROM vaultcore.exams e`
+	  slug, name, short_name, category, icon, description, popular_years,
+	  papers,
+	  total_questions,
+	  mocks,
+	  COALESCE(subjects, '[]'::jsonb)
+	FROM vaultcore.exams`
 
 func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, error) {
-	rows, err := r.db.QueryContext(ctx, examSelectSQL+` ORDER BY e.name`)
+	rows, err := r.db.QueryContext(ctx, examSelectSQL+` ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list exams: %w", err)
 	}
@@ -87,7 +87,7 @@ func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, erro
 }
 
 func (r *PostgresRepository) GetExamBySlug(ctx context.Context, slug string) (models.Exam, error) {
-	row := r.db.QueryRowContext(ctx, examSelectSQL+` WHERE e.slug = $1`, slug)
+	row := r.db.QueryRowContext(ctx, examSelectSQL+` WHERE slug = $1`, slug)
 	exam, err := scanExam(row)
 	if err != nil {
 		return models.Exam{}, mapNotFound(err)
@@ -298,17 +298,16 @@ func (r *PostgresRepository) UpsertExam(ctx context.Context, req models.AdminCre
 	if err != nil {
 		return fmt.Errorf("marshal exam subjects: %w", err)
 	}
-
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO vaultcore.exams (slug, name, short_name, category, icon, total_questions, papers, mocks, description, popular_years, subjects)
 		VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, $8)
 		ON CONFLICT (slug) DO UPDATE SET
-			name = EXCLUDED.name,
-			short_name = EXCLUDED.short_name,
-			category = EXCLUDED.category,
-			icon = EXCLUDED.icon,
+			name        = EXCLUDED.name,
+			short_name  = EXCLUDED.short_name,
+			category    = EXCLUDED.category,
+			icon        = EXCLUDED.icon,
 			description = EXCLUDED.description,
-			subjects = EXCLUDED.subjects
+			subjects    = EXCLUDED.subjects
 	`,
 		req.Slug, req.Name, req.ShortName, req.Category, req.Icon,
 		req.Description, popularYears, subjectsJSON,
@@ -857,11 +856,9 @@ func scanExam(row rowScanner) (models.Exam, error) {
 	); err != nil {
 		return models.Exam{}, err
 	}
-	// popularYearsRaw may be NULL for old rows
 	if len(popularYearsRaw) == 0 {
 		popularYearsRaw = []byte("[]")
 	}
-
 	if err := json.Unmarshal(popularYearsRaw, &exam.PopularYears); err != nil {
 		return models.Exam{}, fmt.Errorf("scan exam popular years: %w", err)
 	}
@@ -1090,7 +1087,7 @@ func (r *PostgresRepository) RecordAttempt(ctx context.Context, id, userID, exam
 
 func (r *PostgresRepository) ListUserEnrollments(ctx context.Context, userID string) ([]models.Exam, error) {
 	rows, err := r.db.QueryContext(ctx, examSelectSQL+`
-		JOIN vaultcore.user_enrollments ue ON ue.exam_slug = e.slug
+		JOIN vaultcore.user_enrollments ue ON ue.exam_slug = vaultcore.exams.slug
 		WHERE ue.user_id = $1
 		ORDER BY ue.enrolled_at DESC
 		LIMIT 8
