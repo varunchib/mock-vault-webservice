@@ -54,11 +54,11 @@ ON CONFLICT (slug) DO UPDATE SET
   tags = EXCLUDED.tags,
   updated_at = CURRENT_TIMESTAMP;
 
-INSERT INTO vaultcore.mocks (slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects)
+INSERT INTO vaultcore.mocks (slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking)
 VALUES
-  ('upsc-prelims-gs-mini-mock-2026', 'upsc-cse', 'UPSC CSE', 'UPSC Prelims GS Mini Mock 2026', 'A focused UPSC Prelims mini mock covering polity, geography, history, economy, and environment with instant review.', 25, 30, 'Moderate', TRUE, '["Polity","Geography","History","Environment"]'),
-  ('ssc-cgl-tier-1-reasoning-sprint', 'ssc-cgl', 'SSC CGL', 'SSC CGL Tier 1 Reasoning Sprint', 'Timed reasoning practice for SSC CGL Tier 1 with previous-year style questions and score analysis.', 30, 20, 'Beginner', TRUE, '["General Intelligence & Reasoning","Quantitative Aptitude","General Awareness"]'),
-  ('jkssb-finance-accounts-full-mock', 'jkssb', 'JKSSB', 'JKSSB Finance Accounts Full Mock', 'Full-length JKSSB finance and accounts mock with public finance, accounting, reasoning, and JK GK coverage.', 100, 120, 'Advanced', FALSE, '["Public Finance","Accountancy","General Intelligence & Reasoning","J&K General Knowledge"]')
+  ('upsc-prelims-gs-mini-mock-2026', 'upsc-cse', 'UPSC CSE', 'UPSC Prelims GS Mini Mock 2026', 'A focused UPSC Prelims mini mock covering polity, geography, history, economy, and environment with instant review.', 25, 30, 'Moderate', TRUE, '["Polity","Geography","History","Environment"]', 0.33),
+  ('ssc-cgl-tier-1-reasoning-sprint', 'ssc-cgl', 'SSC CGL', 'SSC CGL Tier 1 Reasoning Sprint', 'Timed reasoning practice for SSC CGL Tier 1 with previous-year style questions and score analysis.', 30, 20, 'Beginner', TRUE, '["General Intelligence & Reasoning","Quantitative Aptitude","General Awareness"]', 0.5),
+  ('jkssb-finance-accounts-full-mock', 'jkssb', 'JKSSB', 'JKSSB Finance Accounts Full Mock', 'Full-length JKSSB finance and accounts mock with public finance, accounting, reasoning, and JK GK coverage.', 100, 120, 'Advanced', FALSE, '["Public Finance","Accountancy","General Intelligence & Reasoning","J&K General Knowledge"]', 0.25)
 ON CONFLICT (slug) DO UPDATE SET
   exam_slug = EXCLUDED.exam_slug,
   exam_name = EXCLUDED.exam_name,
@@ -69,4 +69,5 @@ ON CONFLICT (slug) DO UPDATE SET
   difficulty = EXCLUDED.difficulty,
   is_free = EXCLUDED.is_free,
   subjects = EXCLUDED.subjects,
+  negative_marking = EXCLUDED.negative_marking,
   updated_at = CURRENT_TIMESTAMP;
