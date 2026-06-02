@@ -163,6 +163,16 @@ type User struct {
 	LastLogin time.Time `json:"lastLogin"`
 }
 
+type AdminUser struct {
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name"`
+	Role      string    `json:"role"`
+	IsActive  bool      `json:"isActive"`
+	CreatedAt time.Time `json:"createdAt"`
+	LastLogin time.Time `json:"lastLogin"`
+}
+
 type Session struct {
 	ID               string
 	UserID           string

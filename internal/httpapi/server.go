@@ -276,6 +276,9 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("DELETE /api/v1/admin/papers/{slug}", s.withAuth(http.HandlerFunc(s.handleDeletePaper), true))
 	s.mux.Handle("POST /api/v1/admin/cache-flush", s.withAuth(http.HandlerFunc(s.handleFlushCache), true))
 	s.mux.Handle("POST /api/v1/admin/cutoffs", s.withAuth(http.HandlerFunc(s.handleUpsertCutoff), true))
+	s.mux.Handle("GET /api/v1/admin/users", s.withAuth(http.HandlerFunc(s.handleAdminListUsers), true))
+	s.mux.Handle("PATCH /api/v1/admin/users/{id}/status", s.withAuth(http.HandlerFunc(s.handleAdminUpdateUserStatus), true))
+	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
 
 	// Reports
 	s.mux.Handle("POST /api/v1/reports", s.withAuth(http.HandlerFunc(s.handleSubmitReport), false))
@@ -1571,4 +1574,63 @@ func (s *Server) handleExamLeaderboard(w http.ResponseWriter, r *http.Request) {
 		"top10":    top10,
 		"userRank": userRank,
 	})
+}
+
+func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+	limit := 10
+	offset := 0
+	query := r.URL.Query().Get("q")
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 50 {
+			limit = n
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	users, total, err := s.repo.ListAdminUsers(r.Context(), limit, offset, query)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch users")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{
+		"users":  users,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (s *Server) handleAdminActiveCount(w http.ResponseWriter, r *http.Request) {
+	iter := s.rdb.Scan(r.Context(), 0, "live:attempt:*", 200).Iterator()
+	users := map[string]struct{}{}
+	for iter.Next(r.Context()) {
+		parts := strings.SplitN(iter.Val(), ":", 4) // live:attempt:{userID}:{paperSlug}
+		if len(parts) >= 3 {
+			users[parts[2]] = struct{}{}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		s.respondJSON(w, http.StatusOK, map[string]int{"count": 0})
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]int{"count": len(users)})
+}
+
+func (s *Server) handleAdminUpdateUserStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		IsActive bool `json:"isActive"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if err := s.repo.UpdateUserStatus(r.Context(), id, req.IsActive); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to update user status")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "updated"})
 }

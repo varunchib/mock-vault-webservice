@@ -1340,3 +1340,43 @@ func (r *PostgresRepository) CountMocks(ctx context.Context) (int, error) {
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vaultcore.mocks`).Scan(&n)
 	return n, err
 }
+
+func (r *PostgresRepository) ListAdminUsers(ctx context.Context, limit, offset int, query string) ([]models.AdminUser, int, error) {
+	q := "%" + query + "%"
+	var total int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM vaultcore.users
+		WHERE $1 = '%%' OR lower(name) LIKE lower($1) OR lower(email) LIKE lower($1)
+	`, q).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count users: %w", err)
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, email, name, role, is_active, created_at, last_login
+		FROM vaultcore.users
+		WHERE $1 = '%%' OR lower(name) LIKE lower($1) OR lower(email) LIKE lower($1)
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`, q, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+
+	users := make([]models.AdminUser, 0)
+	for rows.Next() {
+		var u models.AdminUser
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin); err != nil {
+			return nil, 0, err
+		}
+		users = append(users, u)
+	}
+	return users, total, rows.Err()
+}
+
+func (r *PostgresRepository) UpdateUserStatus(ctx context.Context, id string, isActive bool) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE vaultcore.users SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
+	`, isActive, id)
+	return err
+}
