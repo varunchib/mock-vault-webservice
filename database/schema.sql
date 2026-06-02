@@ -183,8 +183,31 @@ ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS paper_slug       TE
 ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS attempt_number   INTEGER  NOT NULL DEFAULT 1;
 ALTER TABLE vaultcore.user_attempts ADD COLUMN IF NOT EXISTS is_official       BOOLEAN  NOT NULL DEFAULT TRUE;
 
-ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS negative_marking NUMERIC(4,2) NOT NULL DEFAULT 0;
-ALTER TABLE vaultcore.mocks  ADD COLUMN IF NOT EXISTS negative_marking NUMERIC(4,2) NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS negative_marking   NUMERIC(4,2) NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.mocks  ADD COLUMN IF NOT EXISTS negative_marking   NUMERIC(4,2) NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS duration_minutes   INTEGER      NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS max_marks          INTEGER      NOT NULL DEFAULT 0;
+ALTER TABLE vaultcore.papers ADD COLUMN IF NOT EXISTS held_on            DATE;
+ALTER TABLE vaultcore.exams  ADD COLUMN IF NOT EXISTS board_slug         TEXT REFERENCES vaultcore.exams(slug) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_exams_board_slug ON vaultcore.exams(board_slug);
+
+-- JKSSB post-level exam rows (board_slug = 'jkssb').
+-- Idempotent: ON CONFLICT DO NOTHING so re-running schema.sql on an existing DB is safe.
+INSERT INTO vaultcore.exams (slug, name, short_name, category, icon, total_questions, papers, mocks, description, popular_years, subjects, board_slug)
+VALUES
+  ('jkssb-junior-assistant','JKSSB Junior Assistant','JKSSB Junior Asst.','J&K','📜',0,0,0,
+   'JKSSB Junior Assistant previous year papers with solved answers, detailed explanations, and free practice mocks.',
+   '["2026","2024","2023"]'::jsonb,'["General Knowledge","Computer Knowledge","Quantitative Aptitude","Reasoning","English"]'::jsonb,'jkssb'),
+  ('jkssb-patwari','JKSSB Patwari','JKSSB Patwari','J&K','📜',0,0,0,
+   'JKSSB Patwari previous year papers with GK, Computers, English, Mental Ability fully solved.',
+   '["2024","2023"]'::jsonb,'["General Knowledge","General English","Knowledge of Computers","Mental Ability & Reasoning"]'::jsonb,'jkssb'),
+  ('jkssb-faa','JKSSB Finance Account Assistant','JKSSB FAA','J&K','📊',0,0,0,
+   'JKSSB Finance Account Assistant previous year papers with Public Finance, Accounting, GK solved.',
+   '["2024","2023"]'::jsonb,'["Finance","Accounts","General Knowledge","Reasoning"]'::jsonb,'jkssb'),
+  ('jkssb-wildlife-guard','JKSSB Wildlife Guard','JKSSB Wildlife Guard','J&K','🌿',0,0,0,
+   'JKSSB Wildlife Guard previous year papers with Wildlife Science, GK, Reasoning solved.',
+   '["2026","2024"]'::jsonb,'["Wildlife Conservation","General Knowledge","Quantitative Aptitude","Reasoning","English"]'::jsonb,'jkssb')
+ON CONFLICT (slug) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS vaultcore.exam_cutoffs (
   id          SERIAL       PRIMARY KEY,
