@@ -42,6 +42,7 @@ type Question struct {
 	Answer       string                         `json:"answer"`
 	Explanation  string                         `json:"explanation"`
 	Tags         []string                       `json:"tags"`
+	Images       []string                       `json:"images,omitempty"`
 	Translations map[string]QuestionTranslation `json:"translations,omitempty"`
 }
 
@@ -171,6 +172,7 @@ type AdminUser struct {
 	IsActive  bool      `json:"isActive"`
 	CreatedAt time.Time `json:"createdAt"`
 	LastLogin time.Time `json:"lastLogin"`
+	City      string    `json:"city,omitempty"`
 }
 
 type Session struct {
