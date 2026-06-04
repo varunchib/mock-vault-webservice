@@ -19,6 +19,7 @@ type GoogleUserInput struct {
 	Email     string
 	Name      string
 	AvatarURL string
+	City      string
 }
 
 type SessionInput struct {
@@ -155,7 +156,7 @@ func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (m
 
 func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		ORDER BY exam_name, year DESC, question_no::INTEGER NULLS LAST, question_no
 	`)
@@ -177,7 +178,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 
 func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE exam_slug = $1
 		ORDER BY year DESC, question_no::INTEGER NULLS LAST, question_no
@@ -200,7 +201,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 
 func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
 		ORDER BY question_no::INTEGER NULLS LAST, question_no
@@ -223,7 +224,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 
 func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
 		ORDER BY question_no::INTEGER NULLS LAST, question_no
@@ -246,7 +247,7 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 
 func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string) (models.Question, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE slug = $1
 	`, slug)
@@ -723,16 +724,17 @@ func (r *PostgresRepository) DeleteQuestionBySlug(ctx context.Context, slug stri
 
 func (r *PostgresRepository) UpsertGoogleUser(ctx context.Context, input GoogleUserInput) (models.User, error) {
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO vaultcore.users (id, email, name, avatar_url, last_login, updated_at)
-		VALUES ($1, LOWER($2), $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		INSERT INTO vaultcore.users (id, email, name, avatar_url, city, last_login, updated_at)
+		VALUES ($1, LOWER($2), $3, $4, NULLIF($5, ''), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT (id) DO UPDATE SET
 			email = LOWER(EXCLUDED.email),
 			name = EXCLUDED.name,
 			avatar_url = EXCLUDED.avatar_url,
+			city = COALESCE(vaultcore.users.city, EXCLUDED.city),
 			last_login = CURRENT_TIMESTAMP,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, email, name, COALESCE(avatar_url, ''), role, last_login
-	`, input.ID, input.Email, input.Name, input.AvatarURL)
+	`, input.ID, input.Email, input.Name, input.AvatarURL, input.City)
 
 	var user models.User
 	if err := row.Scan(&user.ID, &user.Email, &user.Name, &user.AvatarURL, &user.Role, &user.LastLogin); err != nil {
@@ -906,6 +908,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 	var optionsRaw []byte
 	var tagsRaw []byte
 	var translationsRaw []byte
+	var imagesRaw []byte
 
 	if err := row.Scan(
 		&question.Slug,
@@ -923,6 +926,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 		&question.Explanation,
 		&tagsRaw,
 		&translationsRaw,
+		&imagesRaw,
 	); err != nil {
 		return models.Question{}, err
 	}
@@ -932,6 +936,11 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 	}
 	if err := json.Unmarshal(tagsRaw, &question.Tags); err != nil {
 		return models.Question{}, fmt.Errorf("scan question tags: %w", err)
+	}
+	if len(imagesRaw) > 0 && string(imagesRaw) != "[]" {
+		if err := json.Unmarshal(imagesRaw, &question.Images); err != nil {
+			return models.Question{}, fmt.Errorf("scan question images: %w", err)
+		}
 	}
 	if len(translationsRaw) > 0 && string(translationsRaw) != "{}" {
 		if err := json.Unmarshal(translationsRaw, &question.Translations); err != nil {
@@ -1352,7 +1361,7 @@ func (r *PostgresRepository) ListAdminUsers(ctx context.Context, limit, offset i
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, email, name, role, is_active, created_at, last_login
+		SELECT id, email, name, role, is_active, created_at, last_login, COALESCE(city, '')
 		FROM vaultcore.users
 		WHERE $1 = '%%' OR lower(name) LIKE lower($1) OR lower(email) LIKE lower($1)
 		ORDER BY created_at DESC
@@ -1366,7 +1375,7 @@ func (r *PostgresRepository) ListAdminUsers(ctx context.Context, limit, offset i
 	users := make([]models.AdminUser, 0)
 	for rows.Next() {
 		var u models.AdminUser
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin, &u.City); err != nil {
 			return nil, 0, err
 		}
 		users = append(users, u)

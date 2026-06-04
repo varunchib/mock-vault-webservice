@@ -36,6 +36,7 @@ type Service struct {
 type SessionMetadata struct {
 	UserAgent string
 	IPAddress string
+	City      string
 }
 
 type AccessClaims struct {
@@ -77,6 +78,7 @@ func (s *Service) AuthenticateGoogle(ctx context.Context, credential string, met
 		Email:     email,
 		Name:      name,
 		AvatarURL: avatarURL,
+		City:      meta.City,
 	})
 	if err != nil {
 		return AuthResult{}, err

@@ -1158,9 +1158,14 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 }
 
 func sessionMetadataFromRequest(r *http.Request) auth.SessionMetadata {
+	city := strings.TrimSpace(r.Header.Get("CF-IPCity"))
+	if city == "XX" || strings.EqualFold(city, "Unknown") {
+		city = ""
+	}
 	return auth.SessionMetadata{
 		UserAgent: strings.TrimSpace(r.UserAgent()),
 		IPAddress: realIP(r),
+		City:      city,
 	}
 }
 
