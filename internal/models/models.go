@@ -186,6 +186,26 @@ type Session struct {
 	RevokedAt        *time.Time
 }
 
+type InboxMessage struct {
+	ID        string    `json:"id"`
+	From      string    `json:"from"` // "user" or "admin"
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type InboxThread struct {
+	ID         string         `json:"id"`
+	UserID     string         `json:"userId"`
+	UserName   string         `json:"userName"`
+	UserEmail  string         `json:"userEmail"`
+	ExamSlug   string         `json:"examSlug,omitempty"`
+	ExamName   string         `json:"examName,omitempty"`
+	SearchTerm string         `json:"searchTerm,omitempty"`
+	Messages   []InboxMessage `json:"messages"`
+	CreatedAt  time.Time      `json:"createdAt"`
+	Status     string         `json:"status"` // "open" | "replied"
+}
+
 type RecentAttempt struct {
 	Type        string    `json:"type"`
 	Slug        string    `json:"slug"`

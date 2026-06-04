@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -279,6 +280,14 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/admin/users", s.withAuth(http.HandlerFunc(s.handleAdminListUsers), true))
 	s.mux.Handle("PATCH /api/v1/admin/users/{id}/status", s.withAuth(http.HandlerFunc(s.handleAdminUpdateUserStatus), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
+
+	// Inbox
+	s.mux.Handle("POST /api/v1/inbox", s.withAuth(http.HandlerFunc(s.handleInboxCreate), false))
+	s.mux.Handle("GET /api/v1/inbox/me", s.withAuth(http.HandlerFunc(s.handleInboxMe), false))
+	s.mux.Handle("POST /api/v1/inbox/{threadId}/message", s.withAuth(http.HandlerFunc(s.handleInboxUserMessage), false))
+	s.mux.Handle("GET /api/v1/admin/inbox", s.withAuth(http.HandlerFunc(s.handleAdminInboxList), true))
+	s.mux.Handle("POST /api/v1/admin/inbox/{threadId}/reply", s.withAuth(http.HandlerFunc(s.handleAdminInboxReply), true))
+	s.mux.Handle("DELETE /api/v1/admin/inbox/{threadId}", s.withAuth(http.HandlerFunc(s.handleAdminInboxDelete), true))
 
 	// Reports
 	s.mux.Handle("POST /api/v1/reports", s.withAuth(http.HandlerFunc(s.handleSubmitReport), false))
@@ -1638,4 +1647,293 @@ func (s *Server) handleAdminUpdateUserStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "updated"})
+}
+
+// ── Inbox ─────────────────────────────────────────────────────────────────────
+
+const (
+	inboxThreadPrefix = "inbox:thread:"
+	inboxUserPrefix   = "inbox:user:"
+	inboxIndexKey     = "inbox:index"
+	inboxRLPrefix     = "inbox:rl:"
+	inboxTTL          = 48 * time.Hour // 2 days, auto-deleted by Redis
+	inboxMaxText      = 500
+	inboxNewPerHour   = 3  // max new threads per user per hour
+	inboxMsgPerHour   = 10 // max follow-up messages per user per hour
+)
+
+var threadIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+func newInboxID() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// sanitizeInbox strips control characters and enforces max length.
+// No HTML is stored — plain text only — so XSS has no attack surface.
+func sanitizeInbox(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || (r >= 32 && r != 127) {
+			b.WriteRune(r)
+		}
+	}
+	out := []rune(b.String())
+	if len(out) > inboxMaxText {
+		out = out[:inboxMaxText]
+	}
+	return string(out)
+}
+
+func (s *Server) inboxLoad(ctx context.Context, id string) (*models.InboxThread, error) {
+	raw, err := s.rdb.Get(ctx, inboxThreadPrefix+id).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	var t models.InboxThread
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *Server) inboxSave(ctx context.Context, t *models.InboxThread) error {
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	pipe := s.rdb.Pipeline()
+	pipe.Set(ctx, inboxThreadPrefix+t.ID, data, inboxTTL)
+	pipe.ZAdd(ctx, inboxIndexKey, redis.Z{Score: float64(t.CreatedAt.Unix()), Member: t.ID})
+	pipe.SAdd(ctx, inboxUserPrefix+t.UserID, t.ID)
+	pipe.Expire(ctx, inboxUserPrefix+t.UserID, inboxTTL)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *Server) handleInboxCreate(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req struct {
+		Text       string `json:"text"`
+		ExamSlug   string `json:"examSlug"`
+		ExamName   string `json:"examName"`
+		SearchTerm string `json:"searchTerm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	text := sanitizeInbox(req.Text)
+	if text == "" {
+		s.respondError(w, http.StatusBadRequest, "Message cannot be empty")
+		return
+	}
+
+	// Rate limit: 3 new threads per user per hour
+	if allowed, _ := s.checkRateLimit(r.Context(), inboxRLPrefix+"new:"+user.ID, inboxNewPerHour, time.Hour); !allowed {
+		s.respondError(w, http.StatusTooManyRequests, "Too many suggestions — try again later")
+		return
+	}
+
+	now := time.Now().UTC()
+	thread := &models.InboxThread{
+		ID:        newInboxID(),
+		UserID:    user.ID,
+		UserName:  user.Name,
+		UserEmail: user.Email,
+		ExamSlug:  sanitizeInbox(req.ExamSlug),
+		ExamName:  sanitizeInbox(req.ExamName),
+		SearchTerm: sanitizeInbox(req.SearchTerm),
+		Messages: []models.InboxMessage{{
+			ID: newInboxID(), From: "user", Text: text, CreatedAt: now,
+		}},
+		CreatedAt: now,
+		Status:    "open",
+	}
+
+	if err := s.inboxSave(r.Context(), thread); err != nil {
+		log.Printf("inbox create: %v", err)
+		s.respondError(w, http.StatusInternalServerError, "Failed to send")
+		return
+	}
+	s.respondJSON(w, http.StatusCreated, map[string]string{"threadId": thread.ID})
+}
+
+func (s *Server) handleInboxMe(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	ids, err := s.rdb.SMembers(r.Context(), inboxUserPrefix+user.ID).Result()
+	if err != nil || len(ids) == 0 {
+		s.respondJSON(w, http.StatusOK, []models.InboxThread{})
+		return
+	}
+
+	threads := make([]models.InboxThread, 0, len(ids))
+	for _, id := range ids {
+		if !threadIDRe.MatchString(id) {
+			continue
+		}
+		t, err := s.inboxLoad(r.Context(), id)
+		if err != nil {
+			s.rdb.SRem(r.Context(), inboxUserPrefix+user.ID, id)
+			continue
+		}
+		if t.UserID != user.ID {
+			continue // ownership check — never expose other users' threads
+		}
+		threads = append(threads, *t)
+	}
+	s.respondJSON(w, http.StatusOK, threads)
+}
+
+func (s *Server) handleInboxUserMessage(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	threadID := r.PathValue("threadId")
+	if !threadIDRe.MatchString(threadID) {
+		s.respondError(w, http.StatusBadRequest, "Invalid thread")
+		return
+	}
+
+	t, err := s.inboxLoad(r.Context(), threadID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "Thread not found")
+		return
+	}
+	if t.UserID != user.ID {
+		s.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	var req struct{ Text string `json:"text"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	text := sanitizeInbox(req.Text)
+	if text == "" {
+		s.respondError(w, http.StatusBadRequest, "Message cannot be empty")
+		return
+	}
+
+	if allowed, _ := s.checkRateLimit(r.Context(), inboxRLPrefix+"msg:"+user.ID, inboxMsgPerHour, time.Hour); !allowed {
+		s.respondError(w, http.StatusTooManyRequests, "Sending too fast — please wait")
+		return
+	}
+
+	t.Messages = append(t.Messages, models.InboxMessage{
+		ID: newInboxID(), From: "user", Text: text, CreatedAt: time.Now().UTC(),
+	})
+	t.Status = "open"
+
+	if err := s.inboxSave(r.Context(), t); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to send")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAdminInboxList(w http.ResponseWriter, r *http.Request) {
+	ids, err := s.rdb.ZRevRange(r.Context(), inboxIndexKey, 0, 99).Result()
+	if err != nil {
+		s.respondJSON(w, http.StatusOK, []models.InboxThread{})
+		return
+	}
+
+	threads := make([]models.InboxThread, 0, len(ids))
+	var stale []interface{}
+	for _, id := range ids {
+		if !threadIDRe.MatchString(id) {
+			stale = append(stale, id)
+			continue
+		}
+		t, err := s.inboxLoad(r.Context(), id)
+		if err != nil {
+			stale = append(stale, id) // expired — clean index
+			continue
+		}
+		threads = append(threads, *t)
+	}
+	if len(stale) > 0 {
+		s.rdb.ZRem(r.Context(), inboxIndexKey, stale...)
+	}
+	s.respondJSON(w, http.StatusOK, threads)
+}
+
+func (s *Server) handleAdminInboxReply(w http.ResponseWriter, r *http.Request) {
+	threadID := r.PathValue("threadId")
+	if !threadIDRe.MatchString(threadID) {
+		s.respondError(w, http.StatusBadRequest, "Invalid thread")
+		return
+	}
+
+	t, err := s.inboxLoad(r.Context(), threadID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "Thread not found")
+		return
+	}
+
+	var req struct{ Text string `json:"text"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	text := sanitizeInbox(req.Text)
+	if text == "" {
+		s.respondError(w, http.StatusBadRequest, "Reply cannot be empty")
+		return
+	}
+
+	t.Messages = append(t.Messages, models.InboxMessage{
+		ID: newInboxID(), From: "admin", Text: text, CreatedAt: time.Now().UTC(),
+	})
+	t.Status = "replied"
+
+	if err := s.inboxSave(r.Context(), t); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to reply")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAdminInboxDelete(w http.ResponseWriter, r *http.Request) {
+	threadID := r.PathValue("threadId")
+	if !threadIDRe.MatchString(threadID) {
+		s.respondError(w, http.StatusBadRequest, "Invalid thread")
+		return
+	}
+
+	t, err := s.inboxLoad(r.Context(), threadID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "Thread not found")
+		return
+	}
+
+	pipe := s.rdb.Pipeline()
+	pipe.Del(r.Context(), inboxThreadPrefix+threadID)
+	pipe.ZRem(r.Context(), inboxIndexKey, threadID)
+	pipe.SRem(r.Context(), inboxUserPrefix+t.UserID, threadID)
+	if _, err := pipe.Exec(r.Context()); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to delete")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
