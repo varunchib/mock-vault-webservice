@@ -1167,21 +1167,45 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 }
 
 func sessionMetadataFromRequest(r *http.Request) auth.SessionMetadata {
+	ip := realIP(r)
 	city := strings.TrimSpace(r.Header.Get("CF-IPCity"))
 	if city == "" || city == "XX" || strings.EqualFold(city, "Unknown") {
-		// Fall back to country code — Cloudflare always sends this
-		country := strings.TrimSpace(r.Header.Get("CF-IPCountry"))
-		if country != "" && country != "XX" && !strings.EqualFold(country, "Unknown") {
-			city = country
-		} else {
-			city = ""
-		}
+		city = cityFromIP(r.Context(), ip)
 	}
 	return auth.SessionMetadata{
 		UserAgent: strings.TrimSpace(r.UserAgent()),
-		IPAddress: realIP(r),
+		IPAddress: ip,
 		City:      city,
 	}
+}
+
+// cityFromIP calls ip-api.com (free, no key) with a 1s timeout.
+// Returns empty string on any failure so login is never blocked.
+func cityFromIP(ctx context.Context, ip string) string {
+	if ip == "" || ip == "127.0.0.1" || ip == "::1" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://ip-api.com/json/"+ip+"?fields=city", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		City string `json:"city"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(result.City)
 }
 
 func newAttemptID() string {
