@@ -1168,8 +1168,14 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 
 func sessionMetadataFromRequest(r *http.Request) auth.SessionMetadata {
 	city := strings.TrimSpace(r.Header.Get("CF-IPCity"))
-	if city == "XX" || strings.EqualFold(city, "Unknown") {
-		city = ""
+	if city == "" || city == "XX" || strings.EqualFold(city, "Unknown") {
+		// Fall back to country code — Cloudflare always sends this
+		country := strings.TrimSpace(r.Header.Get("CF-IPCountry"))
+		if country != "" && country != "XX" && !strings.EqualFold(country, "Unknown") {
+			city = country
+		} else {
+			city = ""
+		}
 	}
 	return auth.SessionMetadata{
 		UserAgent: strings.TrimSpace(r.UserAgent()),
