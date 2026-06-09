@@ -203,6 +203,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /", s.handleRoot)
+	s.mux.HandleFunc("GET /robots.txt", s.handleRobotsTxt)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
 	// Auth endpoints: strict 15 req/min per IP — brute force protection
@@ -297,6 +298,12 @@ func (s *Server) registerRoutes() {
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "mock-vault-webservice is running"})
+}
+
+func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	fmt.Fprintln(w, "User-agent: *\nDisallow: /")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
