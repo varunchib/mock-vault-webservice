@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
@@ -204,6 +205,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /", s.handleRoot)
 	s.mux.HandleFunc("GET /robots.txt", s.handleRobotsTxt)
+	s.mux.HandleFunc("GET /sitemap.xml", s.handleSitemap)
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
 	// Auth endpoints: strict 15 req/min per IP — brute force protection
@@ -304,6 +306,92 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	fmt.Fprintln(w, "User-agent: *\nDisallow: /")
+}
+
+func (s *Server) handleSitemap(w http.ResponseWriter, r *http.Request) {
+	const sfKey = "sitemap:xml"
+	const cacheKey = "cache:sitemap:xml"
+	const ttl = time.Hour
+
+	if s.rdb != nil {
+		if raw, err := s.rdb.Get(r.Context(), cacheKey).Bytes(); err == nil && len(raw) > 0 {
+			writeSitemapResponse(w, raw)
+			return
+		}
+	}
+
+	val, err, _ := s.sfg.Do(sfKey, func() (interface{}, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		entries, err := s.repo.ListSitemapEntries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		data := buildSitemapXML(entries)
+		if s.rdb != nil {
+			_ = s.rdb.Set(context.Background(), cacheKey, data, ttl).Err()
+		}
+		return data, nil
+	})
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeSitemapResponse(w, val.([]byte))
+}
+
+func writeSitemapResponse(w http.ResponseWriter, data []byte) {
+	w.Header().Set("Content-Type", "application/xml; charset=UTF-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(data)
+}
+
+func buildSitemapXML(entries []repository.SitemapEntry) []byte {
+	const base = "https://ministryofpapers.com"
+	var buf bytes.Buffer
+	buf.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	buf.WriteString("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n")
+
+	for _, p := range []struct {
+		loc, freq string
+		pri       float64
+	}{
+		{"/", "weekly", 1.0},
+		{"/exams", "daily", 0.9},
+		{"/about", "monthly", 0.5},
+		{"/privacy", "yearly", 0.3},
+		{"/terms", "yearly", 0.3},
+	} {
+		fmt.Fprintf(&buf,
+			"  <url>\n    <loc>%s%s</loc>\n    <changefreq>%s</changefreq>\n    <priority>%.1f</priority>\n  </url>\n",
+			base, p.loc, p.freq, p.pri)
+	}
+
+	for _, e := range entries {
+		var loc, freq string
+		var pri float64
+		switch e.Kind {
+		case "exam":
+			loc = "/exam/" + e.Slug
+			freq = "weekly"
+			pri = 0.8
+		case "paper":
+			loc = "/pyq/" + e.Slug
+			freq = "monthly"
+			pri = 0.8
+		case "question":
+			loc = "/question/" + e.Slug
+			freq = "monthly"
+			pri = 0.6
+		default:
+			continue
+		}
+		fmt.Fprintf(&buf,
+			"  <url>\n    <loc>%s%s</loc>\n    <lastmod>%s</lastmod>\n    <changefreq>%s</changefreq>\n    <priority>%.1f</priority>\n  </url>\n",
+			base, loc, e.UpdatedAt.UTC().Format("2006-01-02"), freq, pri)
+	}
+	buf.WriteString("</urlset>")
+	return buf.Bytes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
