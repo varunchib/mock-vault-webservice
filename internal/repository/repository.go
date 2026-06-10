@@ -1389,3 +1389,35 @@ func (r *PostgresRepository) UpdateUserStatus(ctx context.Context, id string, is
 	`, isActive, id)
 	return err
 }
+
+// SitemapEntry is one URL row returned for sitemap generation.
+type SitemapEntry struct {
+	Kind      string    // "exam" | "paper" | "question"
+	Slug      string
+	UpdatedAt time.Time
+}
+
+func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapEntry, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT 'exam',     slug, updated_at FROM vaultcore.exams
+		UNION ALL
+		SELECT 'paper',    slug, updated_at FROM vaultcore.papers
+		UNION ALL
+		SELECT 'question', slug, updated_at FROM vaultcore.questions
+		ORDER BY 1, 2
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list sitemap entries: %w", err)
+	}
+	defer rows.Close()
+	var entries []SitemapEntry
+	for rows.Next() {
+		var e SitemapEntry
+		if err := rows.Scan(&e.Kind, &e.Slug, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
