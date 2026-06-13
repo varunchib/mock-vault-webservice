@@ -17,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 
@@ -49,10 +48,10 @@ type Server struct {
 // discardWriter absorbs writes inside singleflight closures (data-only handlers)
 type discardWriter struct{ h http.Header }
 
-func newDiscardWriter() *discardWriter    { return &discardWriter{h: make(http.Header)} }
+func newDiscardWriter() *discardWriter               { return &discardWriter{h: make(http.Header)} }
 func (d *discardWriter) Header() http.Header         { return d.h }
 func (d *discardWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (d *discardWriter) WriteHeader(int)              {}
+func (d *discardWriter) WriteHeader(int)             {}
 
 type errorResponse struct {
 	Message string `json:"message"`
@@ -348,6 +347,16 @@ func writeSitemapResponse(w http.ResponseWriter, data []byte) {
 
 func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 	const base = "https://ministryofpapers.com"
+	overviewSlugs := map[string]bool{
+		"jkssb":    true,
+		"ssc-cgl":  true,
+		"upsc-cse": true,
+		"ibps-po":  true,
+		"bpsc":     true,
+		"rssb":     true,
+		"jkpsc":    true,
+		"jkpsi":    true,
+	}
 	var buf bytes.Buffer
 	buf.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	buf.WriteString("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n")
@@ -374,21 +383,26 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 		case "exam":
 			loc = "/exam/" + e.Slug
 			freq = "weekly"
-			pri = 0.8
+			pri = 0.9
 		case "paper":
 			loc = "/pyq/" + e.Slug
 			freq = "monthly"
 			pri = 0.8
-		case "question":
-			loc = "/question/" + e.Slug
+		case "mock_exam":
+			loc = "/mock-test/" + e.Slug
 			freq = "monthly"
-			pri = 0.6
+			pri = 0.8
 		default:
 			continue
 		}
 		fmt.Fprintf(&buf,
 			"  <url>\n    <loc>%s%s</loc>\n    <lastmod>%s</lastmod>\n    <changefreq>%s</changefreq>\n    <priority>%.1f</priority>\n  </url>\n",
 			base, loc, e.UpdatedAt.UTC().Format("2006-01-02"), freq, pri)
+		if e.Kind == "exam" && overviewSlugs[e.Slug] {
+			fmt.Fprintf(&buf,
+				"  <url>\n    <loc>%s/exam/%s/overview</loc>\n    <lastmod>%s</lastmod>\n    <changefreq>monthly</changefreq>\n    <priority>0.9</priority>\n  </url>\n",
+				base, e.Slug, e.UpdatedAt.UTC().Format("2006-01-02"))
+		}
 	}
 	buf.WriteString("</urlset>")
 	return buf.Bytes()
@@ -475,7 +489,6 @@ func (s *Server) handleListExamPapers(w http.ResponseWriter, r *http.Request) (a
 func (s *Server) handleListExamQuestions(w http.ResponseWriter, r *http.Request) (any, error) {
 	return s.repo.ListQuestionsByExam(r.Context(), r.PathValue("slug"))
 }
-
 
 func (s *Server) handleGetQuestion(w http.ResponseWriter, r *http.Request) (any, error) {
 	return s.repo.GetQuestionBySlug(r.Context(), r.PathValue("slug"))
@@ -586,7 +599,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); exams, errs[0] = s.repo.ListExams(r.Context()) }()
 	go func() { defer wg.Done(); mocks, errs[1] = s.repo.ListMocks(r.Context()) }()
 	go func() { defer wg.Done(); enrolledExams, errs[2] = s.repo.ListUserEnrollments(r.Context(), user.ID) }()
-	go func() { defer wg.Done(); recentAttempts, errs[3] = s.repo.ListUserRecentAttempts(r.Context(), user.ID, 8) }()
+	go func() {
+		defer wg.Done()
+		recentAttempts, errs[3] = s.repo.ListUserRecentAttempts(r.Context(), user.ID, 8)
+	}()
 	wg.Wait()
 
 	for _, err := range errs {
@@ -1872,12 +1888,12 @@ func (s *Server) handleInboxCreate(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	thread := &models.InboxThread{
-		ID:        newInboxID(),
-		UserID:    user.ID,
-		UserName:  user.Name,
-		UserEmail: user.Email,
-		ExamSlug:  sanitizeInbox(req.ExamSlug),
-		ExamName:  sanitizeInbox(req.ExamName),
+		ID:         newInboxID(),
+		UserID:     user.ID,
+		UserName:   user.Name,
+		UserEmail:  user.Email,
+		ExamSlug:   sanitizeInbox(req.ExamSlug),
+		ExamName:   sanitizeInbox(req.ExamName),
 		SearchTerm: sanitizeInbox(req.SearchTerm),
 		Messages: []models.InboxMessage{{
 			ID: newInboxID(), From: "user", Text: text, CreatedAt: now,
@@ -1948,7 +1964,9 @@ func (s *Server) handleInboxUserMessage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req struct{ Text string `json:"text"` }
+	var req struct {
+		Text string `json:"text"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
@@ -2016,7 +2034,9 @@ func (s *Server) handleAdminInboxReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct{ Text string `json:"text"` }
+	var req struct {
+		Text string `json:"text"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
