@@ -158,7 +158,9 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
-		ORDER BY exam_name, year DESC, question_no::INTEGER NULLS LAST, question_no
+		ORDER BY exam_name, year DESC,
+			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
+			question_no
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list questions: %w", err)
@@ -181,7 +183,9 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE exam_slug = $1
-		ORDER BY year DESC, question_no::INTEGER NULLS LAST, question_no
+		ORDER BY year DESC,
+			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
+			question_no
 	`, examSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list questions by exam: %w", err)
@@ -204,7 +208,9 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
-		ORDER BY question_no::INTEGER NULLS LAST, question_no
+		ORDER BY
+			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
+			question_no
 	`, paperSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list questions by paper: %w", err)
@@ -227,7 +233,9 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
-		ORDER BY question_no::INTEGER NULLS LAST, question_no
+		ORDER BY
+			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
+			question_no
 	`, mockSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list questions by mock: %w", err)
