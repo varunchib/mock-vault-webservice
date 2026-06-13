@@ -1392,18 +1392,23 @@ func (r *PostgresRepository) UpdateUserStatus(ctx context.Context, id string, is
 
 // SitemapEntry is one URL row returned for sitemap generation.
 type SitemapEntry struct {
-	Kind      string    // "exam" | "paper" | "question"
+	Kind      string // "exam" | "paper" | "mock_exam"
 	Slug      string
 	UpdatedAt time.Time
 }
 
 func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapEntry, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT 'exam',     slug, updated_at FROM vaultcore.exams
+		SELECT 'exam', slug, updated_at
+		FROM vaultcore.exams
+		WHERE papers > 0 OR mocks > 0 OR slug IN ('jkssb', 'ssc-cgl', 'upsc-cse', 'ibps-po', 'bpsc', 'rssb', 'jkpsc', 'jkpsi')
 		UNION ALL
-		SELECT 'paper',    slug, updated_at FROM vaultcore.papers
+		SELECT 'paper', slug, updated_at
+		FROM vaultcore.papers
 		UNION ALL
-		SELECT 'question', slug, updated_at FROM vaultcore.questions
+		SELECT 'mock_exam', exam_slug, MAX(updated_at)
+		FROM vaultcore.mocks
+		GROUP BY exam_slug
 		ORDER BY 1, 2
 	`)
 	if err != nil {
@@ -1420,4 +1425,3 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 	}
 	return entries, rows.Err()
 }
-
