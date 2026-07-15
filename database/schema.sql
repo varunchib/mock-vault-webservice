@@ -249,3 +249,22 @@ BEGIN
       FOREIGN KEY (exam_slug) REFERENCES vaultcore.exams(slug) ON DELETE CASCADE;
   END IF;
 END $$;
+
+-- Trigram indexes so admin user search (LIKE '%q%') uses an index instead of a
+-- full-table scan once the users table grows large.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_users_name_trgm  ON vaultcore.users USING gin (lower(name)  gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_users_email_trgm ON vaultcore.users USING gin (lower(email) gin_trgm_ops);
+
+-- Admin audit log: append-only trail of privileged mutations.
+CREATE TABLE IF NOT EXISTS vaultcore.admin_audit_log (
+  id          BIGSERIAL   PRIMARY KEY,
+  actor_id    TEXT        NOT NULL,
+  actor_email TEXT        NOT NULL,
+  action      TEXT        NOT NULL,          -- e.g. 'exam.create', 'paper.delete'
+  target      TEXT        NOT NULL DEFAULT '', -- slug or id affected
+  details     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  ip_address  TEXT        NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON vaultcore.admin_audit_log (created_at DESC);

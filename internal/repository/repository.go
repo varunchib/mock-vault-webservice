@@ -1267,10 +1267,10 @@ type LeaderboardEntry struct {
 	IsMe     bool   `json:"isMe"`
 }
 
-// GetExamLeaderboard returns the top-10 performers for an exam (by best score ratio)
-// and the requesting user's rank. UserID may be empty to skip user-rank lookup.
-// Single query: CTE computed once, user rank extracted as scalar subquery.
-func (r *PostgresRepository) GetExamLeaderboard(ctx context.Context, examSlug, userID string) ([]LeaderboardEntry, int, error) {
+// GetExamLeaderboardTop returns the top-10 performers for an exam (by best score
+// ratio). It contains no per-user data, so the result is safe to cache and share
+// across all viewers.
+func (r *PostgresRepository) GetExamLeaderboardTop(ctx context.Context, examSlug string) ([]LeaderboardEntry, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		WITH best AS (
 			SELECT ua.user_id,
@@ -1282,42 +1282,61 @@ func (r *PostgresRepository) GetExamLeaderboard(ctx context.Context, examSlug, u
 			  AND ua.total_questions > 0
 			  AND ua.correct_answers > 0
 			GROUP BY ua.user_id, u.name
-		),
-		ranked AS (
-			SELECT user_id, name, ROUND(ratio * 100)::int AS score_pct,
-			       DENSE_RANK() OVER (ORDER BY ratio DESC) AS rnk
-			FROM best
 		)
-		SELECT rnk, user_id, name, score_pct,
-		       (SELECT rnk FROM ranked WHERE ($2 = '' OR user_id = $2) AND $2 != '' LIMIT 1)
-		FROM ranked
+		SELECT user_id, name, ROUND(ratio * 100)::int AS score_pct,
+		       DENSE_RANK() OVER (ORDER BY ratio DESC) AS rnk
+		FROM best
 		ORDER BY rnk, name
 		LIMIT 10
-	`, examSlug, userID)
+	`, examSlug)
 	if err != nil {
-		return nil, -1, fmt.Errorf("leaderboard: %w", err)
+		return nil, fmt.Errorf("leaderboard top: %w", err)
 	}
 	defer rows.Close()
 
 	var entries []LeaderboardEntry
-	userRank := -1
 	for rows.Next() {
 		var e LeaderboardEntry
-		var rankFromRow *int
-		if err := rows.Scan(&e.Rank, &e.UserID, &e.Name, &e.ScorePct, &rankFromRow); err != nil {
-			return nil, -1, err
+		if err := rows.Scan(&e.UserID, &e.Name, &e.ScorePct, &e.Rank); err != nil {
+			return nil, err
 		}
-		e.IsMe = userID != "" && e.UserID == userID
 		entries = append(entries, e)
-		if rankFromRow != nil && userRank == -1 {
-			userRank = *rankFromRow
-		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, -1, err
-	}
+	return entries, rows.Err()
+}
 
-	return entries, userRank, nil
+// GetUserExamRank returns the requesting user's dense rank for an exam, or -1 if
+// the user has no qualifying attempt. Cached per-user at the handler layer.
+func (r *PostgresRepository) GetUserExamRank(ctx context.Context, examSlug, userID string) (int, error) {
+	if strings.TrimSpace(userID) == "" {
+		return -1, nil
+	}
+	var rank sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `
+		WITH best AS (
+			SELECT ua.user_id,
+			       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+			FROM vaultcore.user_attempts ua
+			WHERE ua.exam_slug = $1
+			  AND ua.total_questions > 0
+			  AND ua.correct_answers > 0
+			GROUP BY ua.user_id
+		),
+		ranked AS (
+			SELECT user_id, DENSE_RANK() OVER (ORDER BY ratio DESC) AS rnk FROM best
+		)
+		SELECT rnk FROM ranked WHERE user_id = $2
+	`, examSlug, userID).Scan(&rank)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return -1, nil
+		}
+		return -1, fmt.Errorf("user exam rank: %w", err)
+	}
+	if !rank.Valid {
+		return -1, nil
+	}
+	return int(rank.Int64), nil
 }
 
 func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, examSlug, mockSlug, paperSlug string) (int, error) {
@@ -1391,6 +1410,166 @@ func (r *PostgresRepository) ListAdminUsers(ctx context.Context, limit, offset i
 	return users, total, rows.Err()
 }
 
+// AnalyticsAttemptRow is one submitted attempt with enough data to rebuild the
+// user-facing analytics view (subject breakdown is computed from Answers later).
+type AnalyticsAttemptRow struct {
+	Type             string
+	Slug             string
+	ExamSlug         string
+	ExamName         string
+	Title            string
+	TotalQuestions   int
+	MaxMarks         int
+	NegativeMarking  float64
+	Correct          int
+	Wrong            int
+	Skipped          int
+	TimeTakenSeconds int
+	CompletedAt      time.Time
+	Answers          map[string]string
+}
+
+// ListUserAnalyticsRows returns a user's submitted attempts (oldest first, so
+// trend charts read chronologically), joined to paper/mock/exam metadata.
+func (r *PostgresRepository) ListUserAnalyticsRows(ctx context.Context, userID string) ([]AnalyticsAttemptRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END,
+			COALESCE(ua.paper_slug, ua.mock_slug, ''),
+			ua.exam_slug,
+			COALESCE(e.short_name, ''),
+			COALESCE(p.title, m.title, ''),
+			COALESCE(NULLIF(p.questions, 0), NULLIF(m.questions, 0), ua.total_questions),
+			COALESCE(p.max_marks, 0),
+			COALESCE(p.negative_marking, m.negative_marking, 0),
+			ua.correct_answers, ua.wrong_answers, ua.skipped_answers,
+			ua.time_taken_seconds, ua.completed_at, ua.answers
+		FROM vaultcore.user_attempts ua
+		LEFT JOIN vaultcore.papers p ON ua.paper_slug = p.slug
+		LEFT JOIN vaultcore.mocks  m ON ua.mock_slug  = m.slug
+		LEFT JOIN vaultcore.exams  e ON ua.exam_slug  = e.slug
+		WHERE ua.user_id = $1 AND ua.total_questions > 0
+		ORDER BY ua.completed_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list user analytics rows: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]AnalyticsAttemptRow, 0)
+	for rows.Next() {
+		var row AnalyticsAttemptRow
+		var answersRaw []byte
+		if err := rows.Scan(&row.Type, &row.Slug, &row.ExamSlug, &row.ExamName, &row.Title,
+			&row.TotalQuestions, &row.MaxMarks, &row.NegativeMarking,
+			&row.Correct, &row.Wrong, &row.Skipped,
+			&row.TimeTakenSeconds, &row.CompletedAt, &answersRaw); err != nil {
+			return nil, err
+		}
+		row.Answers = map[string]string{}
+		if len(answersRaw) > 0 {
+			_ = json.Unmarshal(answersRaw, &row.Answers)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// GetAdminUserByID returns the full admin-visible profile for one user.
+func (r *PostgresRepository) GetAdminUserByID(ctx context.Context, id string) (models.AdminUser, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, email, name, role, is_active, created_at, last_login, COALESCE(city, '')
+		FROM vaultcore.users
+		WHERE id = $1
+	`, id)
+	var u models.AdminUser
+	if err := row.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin, &u.City); err != nil {
+		return models.AdminUser{}, mapNotFound(err)
+	}
+	return u, nil
+}
+
+// ListUserAttemptsDetailed returns a user's most recent scored attempts (papers + mocks).
+func (r *PostgresRepository) ListUserAttemptsDetailed(ctx context.Context, userID string, limit int) ([]models.AdminUserAttempt, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			CASE WHEN ua.paper_slug IS NOT NULL THEN 'paper' ELSE 'mock' END AS type,
+			COALESCE(ua.paper_slug, ua.mock_slug, '') AS slug,
+			ua.exam_slug,
+			COALESCE(e.short_name, '') AS exam_name,
+			COALESCE(p.title, m.title, '') AS title,
+			ua.correct_answers,
+			ua.total_questions,
+			CASE WHEN ua.total_questions > 0
+			     THEN ROUND(ua.correct_answers::float / ua.total_questions * 100)::int
+			     ELSE 0 END AS score_pct,
+			ua.time_taken_seconds,
+			ua.completed_at
+		FROM vaultcore.user_attempts ua
+		LEFT JOIN vaultcore.papers p ON ua.paper_slug = p.slug
+		LEFT JOIN vaultcore.mocks  m ON ua.mock_slug  = m.slug
+		LEFT JOIN vaultcore.exams  e ON ua.exam_slug  = e.slug
+		WHERE ua.user_id = $1
+		ORDER BY ua.completed_at DESC
+		LIMIT $2
+	`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list user attempts detailed: %w", err)
+	}
+	defer rows.Close()
+
+	attempts := make([]models.AdminUserAttempt, 0)
+	for rows.Next() {
+		var a models.AdminUserAttempt
+		if err := rows.Scan(&a.Type, &a.Slug, &a.ExamSlug, &a.ExamName, &a.Title,
+			&a.Correct, &a.Total, &a.ScorePct, &a.TimeTakenSeconds, &a.CompletedAt); err != nil {
+			return nil, err
+		}
+		attempts = append(attempts, a)
+	}
+	return attempts, rows.Err()
+}
+
+// GetUserExamRanks returns the user's leaderboard standing for every exam they
+// have a qualifying attempt in — the same ranking the user sees, per exam.
+func (r *PostgresRepository) GetUserExamRanks(ctx context.Context, userID string) ([]models.AdminUserExamRank, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		WITH per_user AS (
+			SELECT exam_slug, user_id,
+			       MAX(correct_answers::float / NULLIF(total_questions,0)) AS ratio
+			FROM vaultcore.user_attempts
+			WHERE total_questions > 0 AND correct_answers > 0
+			GROUP BY exam_slug, user_id
+		),
+		ranked AS (
+			SELECT exam_slug, user_id,
+			       ROUND(ratio * 100)::int AS score_pct,
+			       DENSE_RANK() OVER (PARTITION BY exam_slug ORDER BY ratio DESC) AS rnk,
+			       COUNT(*)     OVER (PARTITION BY exam_slug) AS total_ranked
+			FROM per_user
+		)
+		SELECT r.exam_slug, COALESCE(e.short_name, ''), r.score_pct, r.rnk, r.total_ranked
+		FROM ranked r
+		LEFT JOIN vaultcore.exams e ON e.slug = r.exam_slug
+		WHERE r.user_id = $1
+		ORDER BY r.score_pct DESC, r.exam_slug
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user exam ranks: %w", err)
+	}
+	defer rows.Close()
+
+	ranks := make([]models.AdminUserExamRank, 0)
+	for rows.Next() {
+		var er models.AdminUserExamRank
+		if err := rows.Scan(&er.ExamSlug, &er.ExamName, &er.ScorePct, &er.Rank, &er.TotalRanked); err != nil {
+			return nil, err
+		}
+		ranks = append(ranks, er)
+	}
+	return ranks, rows.Err()
+}
+
 func (r *PostgresRepository) UpdateUserStatus(ctx context.Context, id string, isActive bool) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE vaultcore.users SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
@@ -1405,18 +1584,67 @@ type SitemapEntry struct {
 	UpdatedAt time.Time
 }
 
+// InsertAuditLog appends one entry to the admin audit trail. details may be nil.
+func (r *PostgresRepository) InsertAuditLog(ctx context.Context, actorID, actorEmail, action, target, ip string, details map[string]any) error {
+	detailsJSON := []byte("{}")
+	if details != nil {
+		if b, err := json.Marshal(details); err == nil {
+			detailsJSON = b
+		}
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO vaultcore.admin_audit_log (actor_id, actor_email, action, target, details, ip_address)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, actorID, actorEmail, action, target, detailsJSON, ip)
+	if err != nil {
+		return fmt.Errorf("insert audit log: %w", err)
+	}
+	return nil
+}
+
+// ListAuditLog returns the most recent audit entries, newest first.
+func (r *PostgresRepository) ListAuditLog(ctx context.Context, limit int) ([]models.AuditEntry, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, actor_id, actor_email, action, target, details, ip_address, created_at
+		FROM vaultcore.admin_audit_log
+		ORDER BY created_at DESC, id DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit log: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]models.AuditEntry, 0)
+	for rows.Next() {
+		var e models.AuditEntry
+		var details []byte
+		if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorEmail, &e.Action, &e.Target, &details, &e.IPAddress, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		e.Details = json.RawMessage(details)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapEntry, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT 'exam', slug, updated_at
 		FROM vaultcore.exams
-		WHERE papers > 0 OR mocks > 0 OR slug IN ('jkssb', 'ssc-cgl', 'upsc-cse', 'ibps-po', 'bpsc', 'rssb', 'jkpsc', 'jkpsi')
+		WHERE papers > 0 OR mocks > 0 OR slug IN ('jkssb', 'ssc-cgl', 'upsc-cse', 'ibps-po', 'bpsc', 'rssb', 'jkpsc')
 		UNION ALL
-		SELECT 'paper', slug, updated_at
-		FROM vaultcore.papers
+		-- Skip near-empty papers (too thin to index → Google marks them Soft 404).
+		-- Count real question rows, not the stored column, so stale counts can't leak.
+		SELECT 'paper', p.slug, p.updated_at
+		FROM vaultcore.papers p
+		WHERE (SELECT count(*) FROM vaultcore.questions q WHERE q.paper_slug = p.slug) >= 5
 		UNION ALL
-		SELECT 'mock_exam', exam_slug, MAX(updated_at)
-		FROM vaultcore.mocks
-		GROUP BY exam_slug
+		-- Only mock hubs whose mocks actually contain questions.
+		SELECT 'mock_exam', m.exam_slug, MAX(m.updated_at)
+		FROM vaultcore.mocks m
+		WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
+		GROUP BY m.exam_slug
 		ORDER BY 1, 2
 	`)
 	if err != nil {
