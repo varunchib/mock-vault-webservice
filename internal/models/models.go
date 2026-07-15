@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Exam struct {
 	Slug           string   `json:"slug"`
@@ -173,6 +176,81 @@ type AdminUser struct {
 	CreatedAt time.Time `json:"createdAt"`
 	LastLogin time.Time `json:"lastLogin"`
 	City      string    `json:"city,omitempty"`
+}
+
+type AuditEntry struct {
+	ID         int64           `json:"id"`
+	ActorID    string          `json:"actorId"`
+	ActorEmail string          `json:"actorEmail"`
+	Action     string          `json:"action"`
+	Target     string          `json:"target"`
+	Details    json.RawMessage `json:"details"`
+	IPAddress  string          `json:"ipAddress"`
+	CreatedAt  time.Time       `json:"createdAt"`
+}
+
+// AdminUserAttempt is one scored attempt shown in the admin user-detail view.
+type AdminUserAttempt struct {
+	Type             string    `json:"type"` // "paper" | "mock"
+	Slug             string    `json:"slug"`
+	ExamSlug         string    `json:"examSlug"`
+	ExamName         string    `json:"examName"`
+	Title            string    `json:"title"`
+	Correct          int       `json:"correct"`
+	Total            int       `json:"total"`
+	ScorePct         int       `json:"scorePct"`
+	TimeTakenSeconds int       `json:"timeTakenSeconds"`
+	CompletedAt      time.Time `json:"completedAt"`
+}
+
+// AdminUserExamRank is the user's leaderboard standing for one exam.
+type AdminUserExamRank struct {
+	ExamSlug    string `json:"examSlug"`
+	ExamName    string `json:"examName"`
+	ScorePct    int    `json:"scorePct"`
+	Rank        int    `json:"rank"`
+	TotalRanked int    `json:"totalRanked"`
+}
+
+// AdminUserDetail is the full profile an admin sees when opening a user.
+type AdminUserDetail struct {
+	User      AdminUser           `json:"user"`
+	Attempts  []AdminUserAttempt  `json:"attempts"`
+	ExamRanks []AdminUserExamRank `json:"examRanks"`
+}
+
+// AdminAnalyticsSubject mirrors the frontend SubjectResult shape.
+type AdminAnalyticsSubject struct {
+	Subject string `json:"subject"`
+	Total   int    `json:"total"`
+	Correct int    `json:"correct"`
+	Wrong   int    `json:"wrong"`
+	Skipped int    `json:"skipped"`
+}
+
+// AdminAnalyticsResult mirrors the frontend CombinedResult shape so the admin
+// analytics view can reuse the exact same UI the user sees.
+type AdminAnalyticsResult struct {
+	Type             string                  `json:"type"`
+	Slug             string                  `json:"slug"`
+	ExamSlug         string                  `json:"examSlug"`
+	ExamName         string                  `json:"examName"`
+	Title            string                  `json:"title"`
+	TotalQuestions   int                     `json:"totalQuestions"`
+	AttemptedAt      time.Time               `json:"attemptedAt"`
+	Answered         int                     `json:"answered"`
+	Correct          int                     `json:"correct"`
+	Wrong            int                     `json:"wrong"`
+	Skipped          int                     `json:"skipped"`
+	MaxMarks         int                     `json:"maxMarks,omitempty"`
+	NegativeMarking  float64                 `json:"negativeMarking,omitempty"`
+	TimeTakenSeconds int                     `json:"timeTakenSeconds"`
+	Subjects         []AdminAnalyticsSubject `json:"subjects"`
+}
+
+type AdminUserAnalytics struct {
+	User    AdminUser              `json:"user"`
+	Results []AdminAnalyticsResult `json:"results"`
 }
 
 type Session struct {

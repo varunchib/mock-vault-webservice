@@ -93,8 +93,55 @@ type activeAttemptInfo struct {
 
 const liveAttemptTTL = 24 * time.Hour
 
+// Secondary indexes so active-attempt lookups never need a full Redis SCAN:
+//
+//	liveIndexKey(user)  → SET of the user's active paperSlugs (per-user reads)
+//	liveGlobalZKey      → ZSET member "userID:paperSlug", score = ExpiresAt unix
+//	                      (background expiry sweep + admin active-user count)
+const (
+	liveIndexPrefix = "live:index:"
+	liveGlobalZKey  = "live:attempts"
+)
+
 func liveAttemptRedisKey(userID, paperSlug string) string {
 	return "live:attempt:" + userID + ":" + paperSlug
+}
+
+func liveIndexKey(userID string) string          { return liveIndexPrefix + userID }
+func liveMember(userID, paperSlug string) string { return userID + ":" + paperSlug }
+
+// splitLiveMember parses "userID:paperSlug". Neither field ever contains a colon
+// (Google subject IDs are numeric, slugs are hyphenated), so the first colon splits.
+func splitLiveMember(member string) (userID, paperSlug string, ok bool) {
+	i := strings.Index(member, ":")
+	if i < 0 {
+		return "", "", false
+	}
+	return member[:i], member[i+1:], true
+}
+
+// trackLiveAttempt records an active attempt in both secondary indexes.
+func (s *Server) trackLiveAttempt(ctx context.Context, userID, paperSlug string, expiresAt time.Time) {
+	if s.rdb == nil {
+		return
+	}
+	pipe := s.rdb.Pipeline()
+	pipe.SAdd(ctx, liveIndexKey(userID), paperSlug)
+	pipe.Expire(ctx, liveIndexKey(userID), liveAttemptTTL)
+	pipe.ZAdd(ctx, liveGlobalZKey, redis.Z{Score: float64(expiresAt.Unix()), Member: liveMember(userID, paperSlug)})
+	_, _ = pipe.Exec(ctx)
+}
+
+// clearLiveAttempt removes the attempt state and both index entries.
+func (s *Server) clearLiveAttempt(ctx context.Context, userID, paperSlug string) {
+	if s.rdb == nil {
+		return
+	}
+	pipe := s.rdb.Pipeline()
+	pipe.Del(ctx, liveAttemptRedisKey(userID, paperSlug))
+	pipe.SRem(ctx, liveIndexKey(userID), paperSlug)
+	pipe.ZRem(ctx, liveGlobalZKey, liveMember(userID, paperSlug))
+	_, _ = pipe.Exec(ctx)
 }
 
 func NewServer(cfg config.Config, repo *repository.PostgresRepository, authService *auth.Service, rdb *redis.Client) *Server {
@@ -281,7 +328,10 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/admin/cutoffs", s.withAuth(http.HandlerFunc(s.handleUpsertCutoff), true))
 	s.mux.Handle("GET /api/v1/admin/users", s.withAuth(http.HandlerFunc(s.handleAdminListUsers), true))
 	s.mux.Handle("PATCH /api/v1/admin/users/{id}/status", s.withAuth(http.HandlerFunc(s.handleAdminUpdateUserStatus), true))
+	s.mux.Handle("GET /api/v1/admin/users/{id}/detail", s.withAuth(http.HandlerFunc(s.handleAdminUserDetail), true))
+	s.mux.Handle("GET /api/v1/admin/users/{id}/analytics", s.withAuth(http.HandlerFunc(s.handleAdminUserAnalytics), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
+	s.mux.Handle("GET /api/v1/admin/audit", s.withAuth(http.HandlerFunc(s.handleListAudit), true))
 
 	// Inbox
 	s.mux.Handle("POST /api/v1/inbox", s.withAuth(http.HandlerFunc(s.handleInboxCreate), false))
@@ -345,8 +395,30 @@ func writeSitemapResponse(w http.ResponseWriter, data []byte) {
 	_, _ = w.Write(data)
 }
 
+// paperCanonicalSlug maps a DB paper slug to the SEO canonical slug used in URLs.
+// The paper page 301-redirects the raw slug to the canonical one, so the sitemap
+// MUST emit the canonical form or Google flags "Page with redirect".
+// Keep in sync with PAPER_SEO_OVERRIDES in mock-vault-webapp/src/lib/paperSeo.ts.
+var paperCanonicalSlug = map[string]string{
+	"jkssb-junior-assistant-pyq":        "jkssb-junior-assistant-question-paper-2026",
+	"jkssb-lab-attendant-2026-may-10":   "jkssb-laboratory-attendant-question-paper-2026",
+	"jkssb-wildlife-guard-2026-may-10":  "jkssb-wildlife-guard-question-paper-2026",
+	"jkssb-patwari-2024-sep1-set-a":     "jkssb-patwari-question-paper-2024",
+	"jkssb-veterinary-pharmacist-2025":  "jkssb-veterinary-pharmacist-question-paper-2025",
+	"jkssb-finance-accounts-2024-paper": "jkssb-finance-accounts-assistant-question-paper-2024",
+}
+
+// sitemapGuideSlugs are the editorial /guide/:slug pages (rendered by the Worker).
+// Keep in sync with the keys of postGuides in mock-vault-webapp/src/data/postGuides.ts.
+var sitemapGuideSlugs = []string{
+	"jkpsi", "upsc-cse", "ssc-cgl", "bpsc", "ibps-po", "jkpsc", "rssb", "jkssb", "neet-ug",
+	"jkssb-patwari", "jkssb-junior-assistant", "jkssb-faa", "jkssb-wildlife-guard", "jkssb-veterinary-pharmacist",
+}
+
 func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 	const base = "https://ministryofpapers.com"
+	// Exams that have a real /overview page (examInfo content). jkpsi is intentionally
+	// excluded: it has no exam row and no overview content, so its URL would redirect.
 	overviewSlugs := map[string]bool{
 		"jkssb":    true,
 		"ssc-cgl":  true,
@@ -355,7 +427,6 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 		"bpsc":     true,
 		"rssb":     true,
 		"jkpsc":    true,
-		"jkpsi":    true,
 	}
 	var buf bytes.Buffer
 	buf.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
@@ -385,7 +456,11 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 			freq = "weekly"
 			pri = 0.9
 		case "paper":
-			loc = "/pyq/" + e.Slug
+			slug := e.Slug
+			if canon, ok := paperCanonicalSlug[slug]; ok {
+				slug = canon
+			}
+			loc = "/pyq/" + slug
 			freq = "monthly"
 			pri = 0.8
 		case "mock_exam":
@@ -404,6 +479,14 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 				base, e.Slug, e.UpdatedAt.UTC().Format("2006-01-02"))
 		}
 	}
+
+	// Editorial guide pages (not in the DB — rendered by the Worker).
+	for _, slug := range sitemapGuideSlugs {
+		fmt.Fprintf(&buf,
+			"  <url>\n    <loc>%s/guide/%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
+			base, slug)
+	}
+
 	buf.WriteString("</urlset>")
 	return buf.Bytes()
 }
@@ -577,6 +660,7 @@ func (s *Server) handleUpsertCutoff(w http.ResponseWriter, r *http.Request) {
 		key := "pub:cutoffs:exam:" + req.ExamSlug
 		s.rdb.Del(r.Context(), key)
 	}
+	s.audit(r, "cutoff.upsert", req.ExamSlug, map[string]any{"stage": req.Stage, "year": req.Year, "category": req.Category})
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "cutoff saved"})
 }
 
@@ -792,6 +876,7 @@ func (s *Server) handleCreateMock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "mock.upsert", input.Slug, nil)
 	s.respondJSON(w, http.StatusCreated, map[string]string{"message": "Mock saved", "slug": input.Slug})
 }
 
@@ -806,6 +891,7 @@ func (s *Server) handleDeleteMock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "mock.delete", slug, nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Mock deleted"})
 }
 
@@ -820,6 +906,7 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "question.delete", slug, nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question deleted"})
 }
 
@@ -867,6 +954,7 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "question.update", slug, nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question updated", "slug": slug})
 }
 
@@ -888,6 +976,7 @@ func (s *Server) handleCreateExam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "exam.upsert", req.Slug, nil)
 	s.respondJSON(w, http.StatusCreated, map[string]string{"message": "Exam saved", "slug": req.Slug})
 }
 
@@ -902,6 +991,7 @@ func (s *Server) handleDeleteExam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "exam.delete", slug, nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Exam deleted"})
 }
 
@@ -923,6 +1013,7 @@ func (s *Server) handleCreatePaper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "paper.upsert", req.Slug, nil)
 	s.respondJSON(w, http.StatusCreated, map[string]string{"message": "Paper saved", "slug": req.Slug})
 }
 
@@ -937,12 +1028,44 @@ func (s *Server) handleDeletePaper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "paper.delete", slug, nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Paper deleted"})
 }
 
 func (s *Server) handleFlushCache(w http.ResponseWriter, r *http.Request) {
 	s.invalidatePublicCache(r.Context())
+	s.audit(r, "cache.flush", "", nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Cache cleared"})
+}
+
+const (
+	userCachePrefix = "cache:user:"
+	userCacheTTL    = 60 * time.Second
+)
+
+// cachedUserByID fetches the (active) user, caching it in Redis for a short window
+// so authenticated requests don't hit Postgres on every call. Only active users are
+// cached (GetUserByID returns ErrNotFound for deactivated ones); the cache is busted
+// explicitly when an admin changes a user's status.
+func (s *Server) cachedUserByID(ctx context.Context, id string) (models.User, error) {
+	if s.rdb != nil {
+		if raw, err := s.rdb.Get(ctx, userCachePrefix+id).Bytes(); err == nil {
+			var u models.User
+			if json.Unmarshal(raw, &u) == nil {
+				return u, nil
+			}
+		}
+	}
+	user, err := s.repo.GetUserByID(ctx, id)
+	if err != nil {
+		return models.User{}, err
+	}
+	if s.rdb != nil {
+		if data, merr := json.Marshal(user); merr == nil {
+			_ = s.rdb.Set(ctx, userCachePrefix+id, data, userCacheTTL).Err()
+		}
+	}
+	return user, nil
 }
 
 func (s *Server) withAuth(next http.Handler, adminOnly bool) http.Handler {
@@ -971,7 +1094,7 @@ func (s *Server) withAuth(next http.Handler, adminOnly bool) http.Handler {
 			return
 		}
 
-		user, err := s.repo.GetUserByID(r.Context(), claims.Subject)
+		user, err := s.cachedUserByID(r.Context(), claims.Subject)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				s.respondError(w, http.StatusUnauthorized, "Unauthorized")
@@ -1244,11 +1367,16 @@ func (s *Server) cors(next http.Handler) http.Handler {
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin != "" {
 			if !s.isAllowedOrigin(origin) {
-				if r.Method == http.MethodOptions {
+				// Disallowed origin. Block preflight and any state-changing request
+				// (CSRF defense — cookies would otherwise ride along on a cross-site
+				// POST/PUT/DELETE). Safe methods fall through without CORS headers,
+				// so the browser still hides the response body.
+				switch r.Method {
+				case http.MethodGet, http.MethodHead:
+					next.ServeHTTP(w, r)
+				default:
 					w.WriteHeader(http.StatusForbidden)
-					return
 				}
-				next.ServeHTTP(w, r)
 				return
 			}
 
@@ -1343,6 +1471,39 @@ func userFromContext(ctx context.Context) (models.User, bool) {
 	return user, ok
 }
 
+// audit records a privileged admin action to the audit trail. It captures the
+// actor/IP synchronously (before the request is recycled), then writes in the
+// background so it never blocks or fails the response. details may be nil.
+func (s *Server) audit(r *http.Request, action, target string, details map[string]any) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		return
+	}
+	actorID, actorEmail, ip := user.ID, user.Email, realIP(r)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.repo.InsertAuditLog(ctx, actorID, actorEmail, action, target, ip, details); err != nil {
+			log.Printf("audit %s: %v", action, err)
+		}
+	}()
+}
+
+func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	entries, err := s.repo.ListAuditLog(r.Context(), limit)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch audit log")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"entries": entries, "count": len(entries)})
+}
+
 // ── Reports ──────────────────────────────────────────────────────────────────
 
 const reportListKey = "admin:reports"
@@ -1380,6 +1541,8 @@ func (s *Server) handleSubmitReport(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusInternalServerError, "Failed to submit report")
 		return
 	}
+	// Cap the list so it can't grow unbounded (keep the newest 1000 reports).
+	s.rdb.LTrim(r.Context(), reportListKey, -1000, -1)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Report submitted"})
 }
 
@@ -1402,6 +1565,7 @@ func (s *Server) handleClearReports(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusInternalServerError, "Failed to clear reports")
 		return
 	}
+	s.audit(r, "reports.clear", "", nil)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Reports cleared"})
 }
 
@@ -1444,6 +1608,7 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 			var state liveAttemptState
 			if json.Unmarshal(raw, &state) == nil {
 				s.rdb.Expire(r.Context(), key, liveAttemptTTL)
+				s.trackLiveAttempt(r.Context(), user.ID, req.PaperSlug, state.ExpiresAt)
 				state.Resumed = true
 				remaining := 0
 				if !state.ExpiresAt.IsZero() {
@@ -1487,6 +1652,7 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 	if s.rdb != nil {
 		data, _ := json.Marshal(state)
 		s.rdb.Set(r.Context(), liveAttemptRedisKey(user.ID, req.PaperSlug), data, liveAttemptTTL)
+		s.trackLiveAttempt(r.Context(), user.ID, req.PaperSlug, state.ExpiresAt)
 	}
 
 	s.respondJSON(w, http.StatusOK, struct {
@@ -1545,53 +1711,58 @@ func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Requ
 	}
 
 	attempts := make([]activeAttemptInfo, 0)
+	if s.rdb == nil {
+		s.respondJSON(w, http.StatusOK, attempts)
+		return
+	}
 
-	if s.rdb != nil {
-		var keys []string
-		iter := s.rdb.Scan(r.Context(), 0, "live:attempt:"+user.ID+":*", 100).Iterator()
-		for iter.Next(r.Context()) {
-			keys = append(keys, iter.Val())
+	ctx := r.Context()
+	// O(active-attempts-for-this-user) via the per-user SET index — no keyspace SCAN.
+	slugs, err := s.rdb.SMembers(ctx, liveIndexKey(user.ID)).Result()
+	if err != nil {
+		s.respondJSON(w, http.StatusOK, attempts)
+		return
+	}
+	for _, slug := range slugs {
+		raw, err := s.rdb.Get(ctx, liveAttemptRedisKey(user.ID, slug)).Bytes()
+		if err != nil {
+			// State expired/submitted but index entry lingered — prune it.
+			s.rdb.SRem(ctx, liveIndexKey(user.ID), slug)
+			s.rdb.ZRem(ctx, liveGlobalZKey, liveMember(user.ID, slug))
+			continue
 		}
-		if iter.Err() == nil {
-			for _, key := range keys {
-				raw, err := s.rdb.Get(r.Context(), key).Bytes()
-				if err != nil {
-					continue
-				}
-				var state liveAttemptState
-				if json.Unmarshal(raw, &state) != nil {
-					continue
-				}
-				remaining := 0
-				if !state.ExpiresAt.IsZero() {
-					remaining = int(time.Until(state.ExpiresAt).Seconds())
-					if remaining < 0 {
-						remaining = 0
-					}
-				}
-				// Skip attempts that have already expired (background worker will submit them)
-				if !state.ExpiresAt.IsZero() && time.Now().After(state.ExpiresAt) {
-					continue
-				}
-				answered := 0
-				for _, v := range state.Answers {
-					if v != "" {
-						answered++
-					}
-				}
-				attempts = append(attempts, activeAttemptInfo{
-					PaperSlug:        state.PaperSlug,
-					ExamSlug:         state.ExamSlug,
-					PaperTitle:       state.PaperTitle,
-					ExamName:         state.ExamName,
-					TotalQuestions:   state.TotalQuestions,
-					AnsweredCount:    answered,
-					CurrentIndex:     state.CurrentIndex,
-					RemainingSeconds: remaining,
-					StartedAt:        state.StartedAt,
-				})
+		var state liveAttemptState
+		if json.Unmarshal(raw, &state) != nil {
+			continue
+		}
+		remaining := 0
+		if !state.ExpiresAt.IsZero() {
+			remaining = int(time.Until(state.ExpiresAt).Seconds())
+			if remaining < 0 {
+				remaining = 0
 			}
 		}
+		// Skip attempts that have already expired (background worker will submit them)
+		if !state.ExpiresAt.IsZero() && time.Now().After(state.ExpiresAt) {
+			continue
+		}
+		answered := 0
+		for _, v := range state.Answers {
+			if v != "" {
+				answered++
+			}
+		}
+		attempts = append(attempts, activeAttemptInfo{
+			PaperSlug:        state.PaperSlug,
+			ExamSlug:         state.ExamSlug,
+			PaperTitle:       state.PaperTitle,
+			ExamName:         state.ExamName,
+			TotalQuestions:   state.TotalQuestions,
+			AnsweredCount:    answered,
+			CurrentIndex:     state.CurrentIndex,
+			RemainingSeconds: remaining,
+			StartedAt:        state.StartedAt,
+		})
 	}
 
 	s.respondJSON(w, http.StatusOK, attempts)
@@ -1626,8 +1797,8 @@ func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if s.rdb != nil && req.PaperSlug != "" {
-		s.rdb.Del(r.Context(), liveAttemptRedisKey(user.ID, req.PaperSlug))
+	if req.PaperSlug != "" {
+		s.clearLiveAttempt(r.Context(), user.ID, req.PaperSlug)
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -1657,33 +1828,44 @@ func (s *Server) startLiveAttemptExpiry() {
 
 func (s *Server) expireOverdueLiveAttempts() {
 	ctx := context.Background()
-	var keys []string
-	iter := s.rdb.Scan(ctx, 0, "live:attempt:*", 100).Iterator()
-	for iter.Next(ctx) {
-		keys = append(keys, iter.Val())
-	}
-	if iter.Err() != nil {
+	now := time.Now().Unix()
+	// Only the overdue members, pulled by score — O(log N + overdue) instead of
+	// scanning the whole keyspace every tick.
+	members, err := s.rdb.ZRangeByScore(ctx, liveGlobalZKey, &redis.ZRangeBy{
+		Min: "0",
+		Max: strconv.FormatInt(now, 10),
+	}).Result()
+	if err != nil {
 		return
 	}
-	for _, key := range keys {
-		raw, err := s.rdb.Get(ctx, key).Bytes()
+	for _, m := range members {
+		userID, paperSlug, ok := splitLiveMember(m)
+		if !ok {
+			s.rdb.ZRem(ctx, liveGlobalZKey, m)
+			continue
+		}
+		raw, err := s.rdb.Get(ctx, liveAttemptRedisKey(userID, paperSlug)).Bytes()
 		if err != nil {
+			// State already gone — drop the stale index entries.
+			s.rdb.ZRem(ctx, liveGlobalZKey, m)
+			s.rdb.SRem(ctx, liveIndexKey(userID), paperSlug)
 			continue
 		}
 		var state liveAttemptState
 		if json.Unmarshal(raw, &state) != nil {
+			s.clearLiveAttempt(ctx, userID, paperSlug)
 			continue
 		}
 		if !state.ExpiresAt.IsZero() && time.Now().After(state.ExpiresAt) {
-			s.autoSubmitLiveAttempt(ctx, key, &state)
+			s.autoSubmitLiveAttempt(ctx, userID, paperSlug, &state)
 		}
 	}
 }
 
-func (s *Server) autoSubmitLiveAttempt(ctx context.Context, redisKey string, state *liveAttemptState) {
+func (s *Server) autoSubmitLiveAttempt(ctx context.Context, userID, paperSlug string, state *liveAttemptState) {
 	questions, err := s.repo.ListQuestionsByPaper(ctx, state.PaperSlug)
 	if err != nil || len(questions) == 0 {
-		s.rdb.Del(ctx, redisKey)
+		s.clearLiveAttempt(ctx, userID, paperSlug)
 		return
 	}
 	correct, wrong, skipped := 0, 0, 0
@@ -1701,7 +1883,7 @@ func (s *Server) autoSubmitLiveAttempt(ctx context.Context, redisKey string, sta
 	if state.AttemptID != "" {
 		_ = s.repo.UpdateAttemptResult(ctx, state.AttemptID, correct, wrong, skipped, timeTaken, state.Answers)
 	}
-	s.rdb.Del(ctx, redisKey)
+	s.clearLiveAttempt(ctx, userID, paperSlug)
 }
 
 // ── Analytics leaderboard ──────────────────────────────────────────────────
@@ -1717,18 +1899,71 @@ func (s *Server) handleExamLeaderboard(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusBadRequest, "examSlug is required")
 		return
 	}
-	top10, userRank, err := s.repo.GetExamLeaderboard(r.Context(), examSlug, user.ID)
+	// Admins can view the board as another user (for the admin analytics view).
+	targetID := user.ID
+	if au := strings.TrimSpace(r.URL.Query().Get("asUser")); au != "" && strings.EqualFold(user.Role, "admin") {
+		targetID = au
+	}
+
+	// Top-10 is identical for every viewer → cache once per exam (60s) and share.
+	top10, err := s.cachedLeaderboardTop(r.Context(), examSlug)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, "Failed to fetch leaderboard")
 		return
 	}
-	if top10 == nil {
-		top10 = []repository.LeaderboardEntry{}
+	// isMe is per-viewer; set it on the (freshly-decoded) slice — cheap, no DB.
+	for i := range top10 {
+		top10[i].IsMe = top10[i].UserID == targetID
 	}
+	userRank := s.cachedUserRank(r.Context(), examSlug, targetID)
 	s.respondJSON(w, http.StatusOK, map[string]any{
 		"top10":    top10,
 		"userRank": userRank,
 	})
+}
+
+// cachedLeaderboardTop returns the shared top-10 for an exam, cached 60s in Redis.
+func (s *Server) cachedLeaderboardTop(ctx context.Context, examSlug string) ([]repository.LeaderboardEntry, error) {
+	cacheKey := "cache:lb:top:" + examSlug
+	if s.rdb != nil {
+		if raw, err := s.rdb.Get(ctx, cacheKey).Bytes(); err == nil {
+			var entries []repository.LeaderboardEntry
+			if json.Unmarshal(raw, &entries) == nil {
+				return entries, nil
+			}
+		}
+	}
+	entries, err := s.repo.GetExamLeaderboardTop(ctx, examSlug)
+	if err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = []repository.LeaderboardEntry{}
+	}
+	if s.rdb != nil {
+		if data, merr := json.Marshal(entries); merr == nil {
+			_ = s.rdb.Set(ctx, cacheKey, data, time.Minute).Err()
+		}
+	}
+	return entries, nil
+}
+
+// cachedUserRank returns the viewer's rank for an exam, cached 60s per user.
+func (s *Server) cachedUserRank(ctx context.Context, examSlug, userID string) int {
+	cacheKey := "cache:lb:rank:" + examSlug + ":" + userID
+	if s.rdb != nil {
+		if v, err := s.rdb.Get(ctx, cacheKey).Int(); err == nil {
+			return v
+		}
+	}
+	rank, err := s.repo.GetUserExamRank(ctx, examSlug, userID)
+	if err != nil {
+		return -1
+	}
+	if s.rdb != nil {
+		_ = s.rdb.Set(ctx, cacheKey, rank, time.Minute).Err()
+	}
+	return rank
 }
 
 func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
@@ -1759,19 +1994,146 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminActiveCount(w http.ResponseWriter, r *http.Request) {
-	iter := s.rdb.Scan(r.Context(), 0, "live:attempt:*", 200).Iterator()
 	users := map[string]struct{}{}
-	for iter.Next(r.Context()) {
-		parts := strings.SplitN(iter.Val(), ":", 4) // live:attempt:{userID}:{paperSlug}
-		if len(parts) >= 3 {
-			users[parts[2]] = struct{}{}
+	if s.rdb != nil {
+		now := time.Now().Unix()
+		// Non-expired members only (score >= now), from the global ZSET — no SCAN.
+		members, err := s.rdb.ZRangeByScore(r.Context(), liveGlobalZKey, &redis.ZRangeBy{
+			Min: strconv.FormatInt(now, 10),
+			Max: "+inf",
+		}).Result()
+		if err == nil {
+			for _, m := range members {
+				if uid, _, ok := splitLiveMember(m); ok {
+					users[uid] = struct{}{}
+				}
+			}
 		}
 	}
-	if err := iter.Err(); err != nil {
-		s.respondJSON(w, http.StatusOK, map[string]int{"count": 0})
+	s.respondJSON(w, http.StatusOK, map[string]int{"count": len(users)})
+}
+
+func (s *Server) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		s.respondError(w, http.StatusBadRequest, "user id is required")
 		return
 	}
-	s.respondJSON(w, http.StatusOK, map[string]int{"count": len(users)})
+	user, err := s.repo.GetAdminUserByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			s.respondError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch user")
+		return
+	}
+	attempts, err := s.repo.ListUserAttemptsDetailed(r.Context(), id, 25)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch attempts")
+		return
+	}
+	ranks, err := s.repo.GetUserExamRanks(r.Context(), id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch rankings")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, models.AdminUserDetail{
+		User:      user,
+		Attempts:  attempts,
+		ExamRanks: ranks,
+	})
+}
+
+// computeAnalyticsSubjects rebuilds the per-subject breakdown from the attempt's
+// answers (question slug → chosen key) and the paper/mock's questions.
+func computeAnalyticsSubjects(questions []models.Question, answers map[string]string) []models.AdminAnalyticsSubject {
+	order := make([]string, 0)
+	byName := make(map[string]*models.AdminAnalyticsSubject)
+	for _, q := range questions {
+		subj := strings.TrimSpace(q.Subject)
+		if subj == "" {
+			subj = "General"
+		}
+		s, ok := byName[subj]
+		if !ok {
+			s = &models.AdminAnalyticsSubject{Subject: subj}
+			byName[subj] = s
+			order = append(order, subj)
+		}
+		s.Total++
+		ans := strings.TrimSpace(answers[q.Slug])
+		switch {
+		case ans == "":
+			s.Skipped++
+		case strings.EqualFold(ans, q.AnswerKey):
+			s.Correct++
+		default:
+			s.Wrong++
+		}
+	}
+	out := make([]models.AdminAnalyticsSubject, 0, len(order))
+	for _, name := range order {
+		out = append(out, *byName[name])
+	}
+	return out
+}
+
+func (s *Server) handleAdminUserAnalytics(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		s.respondError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	user, err := s.repo.GetAdminUserByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			s.respondError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch user")
+		return
+	}
+	rows, err := s.repo.ListUserAnalyticsRows(r.Context(), id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch analytics")
+		return
+	}
+
+	// Cache questions per paper/mock so repeated attempts don't re-query.
+	qCache := make(map[string][]models.Question)
+	results := make([]models.AdminAnalyticsResult, 0, len(rows))
+	for _, row := range rows {
+		cacheKey := row.Type + ":" + row.Slug
+		questions, ok := qCache[cacheKey]
+		if !ok {
+			if row.Type == "paper" {
+				questions, _ = s.repo.ListQuestionsByPaper(r.Context(), row.Slug)
+			} else {
+				questions, _ = s.repo.ListQuestionsByMock(r.Context(), row.Slug)
+			}
+			qCache[cacheKey] = questions
+		}
+		results = append(results, models.AdminAnalyticsResult{
+			Type:             row.Type,
+			Slug:             row.Slug,
+			ExamSlug:         row.ExamSlug,
+			ExamName:         row.ExamName,
+			Title:            row.Title,
+			TotalQuestions:   row.TotalQuestions,
+			AttemptedAt:      row.CompletedAt,
+			Answered:         row.Correct + row.Wrong,
+			Correct:          row.Correct,
+			Wrong:            row.Wrong,
+			Skipped:          row.Skipped,
+			MaxMarks:         row.MaxMarks,
+			NegativeMarking:  row.NegativeMarking,
+			TimeTakenSeconds: row.TimeTakenSeconds,
+			Subjects:         computeAnalyticsSubjects(questions, row.Answers),
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, models.AdminUserAnalytics{User: user, Results: results})
 }
 
 func (s *Server) handleAdminUpdateUserStatus(w http.ResponseWriter, r *http.Request) {
@@ -1787,6 +2149,11 @@ func (s *Server) handleAdminUpdateUserStatus(w http.ResponseWriter, r *http.Requ
 		s.respondError(w, http.StatusInternalServerError, "Failed to update user status")
 		return
 	}
+	// Bust the auth cache so a deactivation takes effect on the user's next request.
+	if s.rdb != nil {
+		s.rdb.Del(r.Context(), userCachePrefix+id)
+	}
+	s.audit(r, "user.status", id, map[string]any{"isActive": req.IsActive})
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "updated"})
 }
 
