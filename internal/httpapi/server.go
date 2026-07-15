@@ -1586,18 +1586,38 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	for _, g := range sitemapGuideSlugs {
 		paths = append(paths, "/guide/"+g)
 	}
-	// Every question page is a distinct SEO landing page — include them all.
+
+	// Question pages are only worth a crawl once they carry a real solution.
+	// Inviting search engines to mass-crawl thin pages just earns "crawled —
+	// currently not indexed". Gate on explanation depth; ?minExplanation=0
+	// submits everything.
+	minExplanation := 300
+	if v := r.URL.Query().Get("minExplanation"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			minExplanation = n
+		}
+	}
+	structural := len(paths)
+	skipped := 0
 	if questions, qerr := s.repo.ListQuestions(r.Context()); qerr == nil {
 		for _, q := range questions {
-			paths = append(paths, "/question/"+q.Slug)
+			if len(strings.TrimSpace(q.Explanation)) >= minExplanation {
+				paths = append(paths, "/question/"+q.Slug)
+			} else {
+				skipped++
+			}
 		}
 	}
 
-	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths)})
+	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths), "skippedThin": skipped})
 	s.pingIndexNow(paths...)
 	s.respondJSON(w, http.StatusAccepted, map[string]any{
-		"message": "Submitted to IndexNow",
-		"urls":    len(paths),
+		"message":        "Submitted to IndexNow",
+		"urls":           len(paths),
+		"structural":     structural,
+		"questions":      len(paths) - structural,
+		"skippedThin":    skipped,
+		"minExplanation": minExplanation,
 	})
 }
 
