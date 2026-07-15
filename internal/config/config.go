@@ -23,6 +23,8 @@ type Config struct {
 	CookieDomain     string
 	CookieSecure     bool
 	CookieSameSite   string
+	IndexNowKey      string
+	SiteHost         string
 }
 
 func Load() (Config, error) {
@@ -41,6 +43,9 @@ func Load() (Config, error) {
 		CookieDomain:     strings.TrimSpace(os.Getenv("COOKIE_DOMAIN")),
 		CookieSecure:     boolOrDefault("COOKIE_SECURE", false),
 		CookieSameSite:   strings.ToLower(envOrDefault("COOKIE_SAME_SITE", "lax")),
+		// IndexNow is optional — unset key disables the pings.
+		IndexNowKey: strings.TrimSpace(os.Getenv("INDEXNOW_KEY")),
+		SiteHost:    envOrDefault("SITE_HOST", "ministryofpapers.com"),
 	}
 
 	switch {

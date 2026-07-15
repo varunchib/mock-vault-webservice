@@ -22,6 +22,7 @@ import (
 
 	"mock-vault-webservice/internal/auth"
 	"mock-vault-webservice/internal/config"
+	"mock-vault-webservice/internal/indexnow"
 	"mock-vault-webservice/internal/models"
 	"mock-vault-webservice/internal/repository" //nolint:depguard
 )
@@ -40,6 +41,7 @@ type Server struct {
 	repo   *repository.PostgresRepository
 	auth   *auth.Service
 	rdb    *redis.Client
+	idx    *indexnow.Client // nil when INDEXNOW_KEY is unset
 	mux    *http.ServeMux
 	sfg    singleflight.Group // cache stampede protection
 	stopCh chan struct{}
@@ -150,6 +152,7 @@ func NewServer(cfg config.Config, repo *repository.PostgresRepository, authServi
 		repo:   repo,
 		auth:   authService,
 		rdb:    rdb,
+		idx:    indexnow.New(cfg.IndexNowKey, cfg.SiteHost),
 		mux:    http.NewServeMux(),
 		stopCh: make(chan struct{}),
 	}
@@ -332,6 +335,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/admin/users/{id}/analytics", s.withAuth(http.HandlerFunc(s.handleAdminUserAnalytics), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
 	s.mux.Handle("GET /api/v1/admin/audit", s.withAuth(http.HandlerFunc(s.handleListAudit), true))
+	s.mux.Handle("POST /api/v1/admin/indexnow/submit-all", s.withAuth(http.HandlerFunc(s.handleIndexNowSubmitAll), true))
 
 	// Inbox
 	s.mux.Handle("POST /api/v1/inbox", s.withAuth(http.HandlerFunc(s.handleInboxCreate), false))
@@ -413,6 +417,65 @@ var paperCanonicalSlug = map[string]string{
 var sitemapGuideSlugs = []string{
 	"jkpsi", "upsc-cse", "ssc-cgl", "bpsc", "ibps-po", "jkpsc", "rssb", "jkssb", "neet-ug",
 	"jkssb-patwari", "jkssb-junior-assistant", "jkssb-faa", "jkssb-wildlife-guard", "jkssb-veterinary-pharmacist",
+}
+
+// canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
+func canonicalPyqSlug(slug string) string {
+	if c, ok := paperCanonicalSlug[slug]; ok {
+		return c
+	}
+	return slug
+}
+
+// submitIndexNowPaths converts site paths to absolute URLs and submits them.
+func (s *Server) submitIndexNowPaths(ctx context.Context, paths []string) {
+	if s.idx == nil || len(paths) == 0 {
+		return
+	}
+	urls := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p != "" {
+			urls = append(urls, "https://"+s.cfg.SiteHost+p)
+		}
+	}
+	if err := s.idx.Submit(ctx, urls); err != nil {
+		log.Printf("indexnow submit: %v", err)
+	}
+}
+
+// pingIndexNow notifies IndexNow about changed paths in the background.
+func (s *Server) pingIndexNow(paths ...string) {
+	if s.idx == nil {
+		return
+	}
+	queued := append([]string(nil), paths...)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		s.submitIndexNowPaths(ctx, queued)
+	}()
+}
+
+// pingIndexNowPaper submits a paper page, its exam hub, and all of its question
+// pages — the set of URLs that change when a paper is added or edited.
+func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
+	if s.idx == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		paths := []string{"/pyq/" + canonicalPyqSlug(paperSlug)}
+		if examSlug != "" {
+			paths = append(paths, "/exam/"+examSlug)
+		}
+		if questions, err := s.repo.ListQuestionsByPaper(ctx, paperSlug); err == nil {
+			for _, q := range questions {
+				paths = append(paths, "/question/"+q.Slug)
+			}
+		}
+		s.submitIndexNowPaths(ctx, paths)
+	}()
 }
 
 func buildSitemapXML(entries []repository.SitemapEntry) []byte {
@@ -907,6 +970,7 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "question.delete", slug, nil)
+	s.pingIndexNow("/question/" + slug)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question deleted"})
 }
 
@@ -955,6 +1019,7 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "question.update", slug, nil)
+	s.pingIndexNow("/question/" + slug)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question updated", "slug": slug})
 }
 
@@ -977,6 +1042,7 @@ func (s *Server) handleCreateExam(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "exam.upsert", req.Slug, nil)
+	s.pingIndexNow("/exam/"+req.Slug, "/exams")
 	s.respondJSON(w, http.StatusCreated, map[string]string{"message": "Exam saved", "slug": req.Slug})
 }
 
@@ -992,6 +1058,7 @@ func (s *Server) handleDeleteExam(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "exam.delete", slug, nil)
+	s.pingIndexNow("/exam/"+slug, "/exams")
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Exam deleted"})
 }
 
@@ -1014,6 +1081,7 @@ func (s *Server) handleCreatePaper(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "paper.upsert", req.Slug, nil)
+	s.pingIndexNowPaper(req.Slug, req.ExamSlug)
 	s.respondJSON(w, http.StatusCreated, map[string]string{"message": "Paper saved", "slug": req.Slug})
 }
 
@@ -1029,6 +1097,8 @@ func (s *Server) handleDeletePaper(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "paper.delete", slug, nil)
+	// Ping so search engines re-crawl and pick up the 404.
+	s.pingIndexNow("/pyq/" + canonicalPyqSlug(slug))
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Paper deleted"})
 }
 
@@ -1487,6 +1557,48 @@ func (s *Server) audit(r *http.Request, action, target string, details map[strin
 			log.Printf("audit %s: %v", action, err)
 		}
 	}()
+}
+
+// handleIndexNowSubmitAll pushes every indexable URL to IndexNow in one go —
+// used to seed search engines with the existing catalogue.
+func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request) {
+	if s.idx == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "IndexNow is not configured (INDEXNOW_KEY unset)")
+		return
+	}
+	entries, err := s.repo.ListSitemapEntries(r.Context())
+	if err != nil {
+		s.respondRepositoryError(w, err)
+		return
+	}
+
+	paths := []string{"/", "/exams", "/about", "/privacy", "/terms"}
+	for _, e := range entries {
+		switch e.Kind {
+		case "exam":
+			paths = append(paths, "/exam/"+e.Slug)
+		case "paper":
+			paths = append(paths, "/pyq/"+canonicalPyqSlug(e.Slug))
+		case "mock_exam":
+			paths = append(paths, "/mock-test/"+e.Slug)
+		}
+	}
+	for _, g := range sitemapGuideSlugs {
+		paths = append(paths, "/guide/"+g)
+	}
+	// Every question page is a distinct SEO landing page — include them all.
+	if questions, qerr := s.repo.ListQuestions(r.Context()); qerr == nil {
+		for _, q := range questions {
+			paths = append(paths, "/question/"+q.Slug)
+		}
+	}
+
+	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths)})
+	s.pingIndexNow(paths...)
+	s.respondJSON(w, http.StatusAccepted, map[string]any{
+		"message": "Submitted to IndexNow",
+		"urls":    len(paths),
+	})
 }
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
