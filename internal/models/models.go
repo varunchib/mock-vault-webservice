@@ -17,6 +17,10 @@ type Exam struct {
 	Description    string   `json:"description"`
 	PopularYears   []string `json:"popularYears"`
 	Subjects       []string `json:"subjects"`
+	// BoardSlug is the parent board (e.g. "jkssb" for "jkssb-patwari"), empty
+	// for a top-level exam. The column, its FK and its index already existed;
+	// exposing it lets clients stop inferring the hierarchy from slug prefixes.
+	BoardSlug string `json:"boardSlug,omitempty"`
 }
 
 type QuestionOption struct {

@@ -62,12 +62,27 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 
 const examSelectSQL = `
 	SELECT
-	  slug, name, short_name, category, icon, description, popular_years,
-	  papers,
-	  total_questions,
-	  mocks,
-	  COALESCE(subjects, '[]'::jsonb)
-	FROM vaultcore.exams`
+	  e.slug, e.name, e.short_name, e.category, e.icon, e.description, e.popular_years,
+	  -- Counted, not stored. The stored papers/total_questions columns drift:
+	  -- jkssb read papers=6/total_questions=680 against a real 8/920. Counting
+	  -- also rolls a board's sub-exams up into it, matching what the exam page
+	  -- actually lists. Cheap: idx_papers_exam_slug / idx_questions_exam_slug,
+	  -- and the public catalog is Redis-cached.
+	  (SELECT count(*) FROM vaultcore.papers p
+	     WHERE p.exam_slug = e.slug
+	        OR p.exam_slug IN (SELECT s.slug FROM vaultcore.exams s WHERE s.board_slug = e.slug)),
+	  (SELECT count(*) FROM vaultcore.questions q
+	     WHERE q.exam_slug = e.slug
+	        OR q.exam_slug IN (SELECT s.slug FROM vaultcore.exams s WHERE s.board_slug = e.slug)),
+	  -- Counted (so it cannot drift like the stored column did) but deliberately
+	  -- NOT board-aware: unlike papers and questions, a mock belongs to the exam
+	  -- it was written for and does not roll up to the board. This has to match
+	  -- ExamPage's examMocks filter, or the card would advertise mocks the Mocks
+	  -- tab never shows.
+	  (SELECT count(*) FROM vaultcore.mocks mk WHERE mk.exam_slug = e.slug),
+	  COALESCE(e.subjects, '[]'::jsonb),
+	  COALESCE(e.board_slug, '')
+	FROM vaultcore.exams e`
 
 func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, error) {
 	rows, err := r.db.QueryContext(ctx, examSelectSQL+` ORDER BY name`)
@@ -122,7 +137,12 @@ func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug stri
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT slug, exam_slug, exam_name, title, year, shift, description, questions, subjects, negative_marking, source_url, duration_minutes, max_marks, held_on::text
 		FROM vaultcore.papers
+		-- A board shows every paper beneath it: its own, plus those of the exams
+		-- whose board_slug points at it. Without this a board page would go thin
+		-- the moment papers are re-pointed onto its sub-exams. Uses
+		-- idx_papers_exam_slug and idx_exams_board_slug.
 		WHERE exam_slug = $1
+		   OR exam_slug IN (SELECT slug FROM vaultcore.exams WHERE board_slug = $1)
 		ORDER BY held_on DESC NULLS LAST, year DESC, title
 	`, examSlug)
 	if err != nil {
@@ -182,7 +202,9 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
 		FROM vaultcore.questions
+		-- Same rule as papers: a board aggregates its sub-exams' questions.
 		WHERE exam_slug = $1
+		   OR exam_slug IN (SELECT slug FROM vaultcore.exams WHERE board_slug = $1)
 		ORDER BY year DESC,
 			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
 			question_no
@@ -863,6 +885,7 @@ func scanExam(row rowScanner) (models.Exam, error) {
 		&exam.TotalQuestions,
 		&exam.Mocks,
 		&subjectsRaw,
+		&exam.BoardSlug,
 	); err != nil {
 		return models.Exam{}, err
 	}
@@ -1104,7 +1127,9 @@ func (r *PostgresRepository) RecordAttempt(ctx context.Context, id, userID, exam
 
 func (r *PostgresRepository) ListUserEnrollments(ctx context.Context, userID string) ([]models.Exam, error) {
 	rows, err := r.db.QueryContext(ctx, examSelectSQL+`
-		JOIN vaultcore.user_enrollments ue ON ue.exam_slug = vaultcore.exams.slug
+		-- examSelectSQL aliases vaultcore.exams AS e; once aliased, the original
+		-- table name is not a valid reference here.
+		JOIN vaultcore.user_enrollments ue ON ue.exam_slug = e.slug
 		WHERE ue.user_id = $1
 		ORDER BY ue.enrolled_at DESC
 		LIMIT 8
