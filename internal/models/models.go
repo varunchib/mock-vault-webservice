@@ -304,4 +304,7 @@ type Dashboard struct {
 	Mocks          []MockItem      `json:"mocks"`
 	EnrolledExams  []Exam          `json:"enrolledExams"`
 	RecentAttempts []RecentAttempt `json:"recentAttempts"`
+	// Papers added to each enrolled exam after the user enrolled, keyed by
+	// exam slug — powers the "N new" badge in the dashboard Enrolled section.
+	NewPapersByExam map[string]int `json:"newPapersByExam"`
 }

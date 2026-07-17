@@ -739,16 +739,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		mocks          []models.MockItem
 		enrolledExams  []models.Exam
 		recentAttempts []models.RecentAttempt
-		errs           [4]error
+		newPapers      map[string]int
+		errs           [5]error
 	)
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); exams, errs[0] = s.repo.ListExams(r.Context()) }()
 	go func() { defer wg.Done(); mocks, errs[1] = s.repo.ListMocks(r.Context()) }()
 	go func() { defer wg.Done(); enrolledExams, errs[2] = s.repo.ListUserEnrollments(r.Context(), user.ID) }()
 	go func() {
 		defer wg.Done()
 		recentAttempts, errs[3] = s.repo.ListUserRecentAttempts(r.Context(), user.ID, 8)
+	}()
+	go func() {
+		defer wg.Done()
+		newPapers, errs[4] = s.repo.CountNewPapersForEnrollments(r.Context(), user.ID)
 	}()
 	wg.Wait()
 
@@ -770,12 +775,16 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if recentAttempts == nil {
 		recentAttempts = []models.RecentAttempt{}
 	}
+	if newPapers == nil {
+		newPapers = map[string]int{}
+	}
 	s.respondJSON(w, http.StatusOK, models.Dashboard{
-		User:           user,
-		Exams:          exams,
-		Mocks:          mocks,
-		EnrolledExams:  enrolledExams,
-		RecentAttempts: recentAttempts,
+		User:            user,
+		Exams:           exams,
+		Mocks:           mocks,
+		EnrolledExams:   enrolledExams,
+		RecentAttempts:  recentAttempts,
+		NewPapersByExam: newPapers,
 	})
 }
 

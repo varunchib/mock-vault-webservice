@@ -1150,6 +1150,36 @@ func (r *PostgresRepository) ListUserEnrollments(ctx context.Context, userID str
 	return exams, rows.Err()
 }
 
+// CountNewPapersForEnrollments returns, per enrolled exam, how many papers were
+// added after the user enrolled — the "something new since you subscribed"
+// signal the dashboard's Enrolled section surfaces as a badge.
+func (r *PostgresRepository) CountNewPapersForEnrollments(ctx context.Context, userID string) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT ue.exam_slug, COUNT(p.slug)
+		FROM vaultcore.user_enrollments ue
+		JOIN vaultcore.papers p
+		  ON p.exam_slug = ue.exam_slug
+		 AND p.created_at > ue.enrolled_at
+		WHERE ue.user_id = $1
+		GROUP BY ue.exam_slug
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("count new papers for enrollments: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var slug string
+		var n int
+		if err := rows.Scan(&slug, &n); err != nil {
+			return nil, err
+		}
+		counts[slug] = n
+	}
+	return counts, rows.Err()
+}
+
 func (r *PostgresRepository) ListUserRecentAttempts(ctx context.Context, userID string, limit int) ([]models.RecentAttempt, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT type, slug, exam_slug, exam_name, title, questions, completed_at
