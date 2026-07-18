@@ -318,6 +318,10 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/activity/attempt/active", s.withAuth(http.HandlerFunc(s.handleGetActiveLiveAttempts), false))
 	s.mux.Handle("POST /api/v1/activity/attempt/submit", s.withAuth(http.HandlerFunc(s.handleSubmitLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/analytics/leaderboard", s.withAuth(http.HandlerFunc(s.handleExamLeaderboard), false))
+	s.mux.Handle("GET /api/v1/analytics/score-distribution",
+		s.cachedPublicKey(60*time.Second, func(r *http.Request) string {
+			return "scoredist:" + strings.TrimSpace(r.URL.Query().Get("examSlug"))
+		}, s.handleScoreDistribution))
 	s.mux.Handle("GET /api/v1/admin/summary", s.withAuth(http.HandlerFunc(s.handleAdminSummary), true))
 	s.mux.Handle("POST /api/v1/admin/exams", s.withAuth(http.HandlerFunc(s.handleCreateExam), true))
 	s.mux.Handle("DELETE /api/v1/admin/exams/{slug}", s.withAuth(http.HandlerFunc(s.handleDeleteExam), true))
@@ -2028,6 +2032,17 @@ func (s *Server) autoSubmitLiveAttempt(ctx context.Context, userID, paperSlug st
 }
 
 // ── Analytics leaderboard ──────────────────────────────────────────────────
+
+// handleScoreDistribution powers the "Score position" chart: how all platform
+// users scored on an exam, bucketed by 10%, plus the system-estimated cutoff.
+// Public and cached — the distribution is identical for every viewer.
+func (s *Server) handleScoreDistribution(_ http.ResponseWriter, r *http.Request) (any, error) {
+	examSlug := strings.TrimSpace(r.URL.Query().Get("examSlug"))
+	if examSlug == "" {
+		return nil, fmt.Errorf("examSlug is required")
+	}
+	return s.repo.GetExamScoreDistribution(r.Context(), examSlug)
+}
 
 func (s *Server) handleExamLeaderboard(w http.ResponseWriter, r *http.Request) {
 	user, ok := userFromContext(r.Context())

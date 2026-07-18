@@ -1394,6 +1394,69 @@ func (r *PostgresRepository) GetUserExamRank(ctx context.Context, examSlug, user
 	return int(rank.Int64), nil
 }
 
+// ScoreDistribution summarises how every platform user scored on an exam:
+// 10-percent buckets of each user's best score, plus a system-estimated
+// cutoff (the 65th percentile of best scores). Unlike the leaderboard it
+// keeps 0-correct users — the distribution should show everyone.
+type ScoreDistribution struct {
+	TotalUsers      int   `json:"totalUsers"`
+	Buckets         []int `json:"buckets"` // 10 buckets: 0-9%, 10-19%, … 90-100%
+	SystemCutoffPct int   `json:"systemCutoffPct"`
+}
+
+func (r *PostgresRepository) GetExamScoreDistribution(ctx context.Context, examSlug string) (*ScoreDistribution, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		WITH best AS (
+			SELECT ua.user_id,
+			       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+			FROM vaultcore.user_attempts ua
+			WHERE ua.exam_slug = $1
+			  AND ua.total_questions > 0
+			GROUP BY ua.user_id
+		)
+		SELECT LEAST(9, FLOOR(ratio * 10))::int AS bucket, COUNT(*)
+		FROM best GROUP BY 1
+	`, examSlug)
+	if err != nil {
+		return nil, fmt.Errorf("score distribution: %w", err)
+	}
+	defer rows.Close()
+
+	dist := &ScoreDistribution{Buckets: make([]int, 10)}
+	for rows.Next() {
+		var bucket, count int
+		if err := rows.Scan(&bucket, &count); err != nil {
+			return nil, err
+		}
+		if bucket >= 0 && bucket < 10 {
+			dist.Buckets[bucket] = count
+			dist.TotalUsers += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var cutoff sql.NullFloat64
+	err = r.db.QueryRowContext(ctx, `
+		WITH best AS (
+			SELECT MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+			FROM vaultcore.user_attempts ua
+			WHERE ua.exam_slug = $1
+			  AND ua.total_questions > 0
+			GROUP BY ua.user_id
+		)
+		SELECT PERCENTILE_CONT(0.65) WITHIN GROUP (ORDER BY ratio) FROM best
+	`, examSlug).Scan(&cutoff)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("score distribution cutoff: %w", err)
+	}
+	if cutoff.Valid {
+		dist.SystemCutoffPct = int(cutoff.Float64 * 100)
+	}
+	return dist, nil
+}
+
 func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, examSlug, mockSlug, paperSlug string) (int, error) {
 	var count int
 	var err error
