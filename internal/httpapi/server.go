@@ -2190,15 +2190,19 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 // abandoned-but-unexpired attempts made that number wrong in both directions.
 func (s *Server) handleAdminActiveCount(w http.ResponseWriter, r *http.Request) {
 	count := 0
+	onlineIds := []string{}
 	if s.rdb != nil {
-		cutoff := time.Now().Add(-presenceWindow).Unix()
-		// Prune stale members so the ZSET stays tiny, then count the rest.
-		_ = s.rdb.ZRemRangeByScore(r.Context(), presenceZKey, "-inf", strconv.FormatInt(cutoff-1, 10)).Err()
-		if n, err := s.rdb.ZCount(r.Context(), presenceZKey, strconv.FormatInt(cutoff, 10), "+inf").Result(); err == nil {
-			count = int(n)
+		cutoff := strconv.FormatInt(time.Now().Add(-presenceWindow).Unix(), 10)
+		// Prune stale members so the ZSET stays tiny, then read the rest. The
+		// IDs power the per-user online dots in the Registered Users table —
+		// same data as the count, so one poll serves both.
+		_ = s.rdb.ZRemRangeByScore(r.Context(), presenceZKey, "-inf", "("+cutoff).Err()
+		if ids, err := s.rdb.ZRangeByScore(r.Context(), presenceZKey, &redis.ZRangeBy{Min: cutoff, Max: "+inf"}).Result(); err == nil {
+			onlineIds = ids
+			count = len(ids)
 		}
 	}
-	s.respondJSON(w, http.StatusOK, map[string]int{"count": count})
+	s.respondJSON(w, http.StatusOK, map[string]any{"count": count, "onlineIds": onlineIds})
 }
 
 // ── Content visit tracking (papers & mocks) ──────────────────────────────
