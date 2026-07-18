@@ -278,8 +278,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
 	// Auth endpoints: strict 15 req/min per IP — brute force protection
-	s.mux.Handle("POST /api/v1/auth/google", s.withRateLimit("auth", 15, time.Minute, http.HandlerFunc(s.handleGoogleLogin)))
-	s.mux.Handle("POST /api/v1/auth/refresh", s.withRateLimit("auth", 15, time.Minute, http.HandlerFunc(s.handleRefresh)))
+	// Login and refresh must NOT share a bucket: every authed page bootstrap
+	// with an expired access token spends a refresh, so a few open tabs used to
+	// drain the combined 15/min pool and 429 the actual LOGIN. Refresh is cheap
+	// and useless to brute-force without a valid cookie, so it gets a wide
+	// window; login stays tight enough to blunt credential stuffing. Both are
+	// per-IP, and Indian mobile carriers CGNAT many users onto one IP — another
+	// reason 15/min combined was far too low.
+	s.mux.Handle("POST /api/v1/auth/google", s.withRateLimit("auth-login", 30, time.Minute, http.HandlerFunc(s.handleGoogleLogin)))
+	s.mux.Handle("POST /api/v1/auth/refresh", s.withRateLimit("auth-refresh", 120, time.Minute, http.HandlerFunc(s.handleRefresh)))
 	s.mux.Handle("GET /api/v1/auth/me", s.withAuth(http.HandlerFunc(s.handleMe), false))
 	s.mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.handleLogout), false))
 
