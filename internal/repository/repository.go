@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
+
 	"mock-vault-webservice/internal/models"
 )
 
@@ -1455,6 +1457,46 @@ func (r *PostgresRepository) GetExamScoreDistribution(ctx context.Context, examS
 		dist.SystemCutoffPct = int(cutoff.Float64 * 100)
 	}
 	return dist, nil
+}
+
+// GetPaperTitlesBySlugs maps paper slugs to [title, examName] for visit lists.
+func (r *PostgresRepository) GetPaperTitlesBySlugs(ctx context.Context, slugs []string) (map[string][2]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT slug, title, exam_name FROM vaultcore.papers WHERE slug = ANY($1)
+	`, pq.Array(slugs))
+	if err != nil {
+		return nil, fmt.Errorf("paper titles by slugs: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][2]string, len(slugs))
+	for rows.Next() {
+		var slug, title, examName string
+		if err := rows.Scan(&slug, &title, &examName); err != nil {
+			return nil, err
+		}
+		out[slug] = [2]string{title, examName}
+	}
+	return out, rows.Err()
+}
+
+// GetMockTitlesBySlugs maps mock slugs to [title, examName] for visit lists.
+func (r *PostgresRepository) GetMockTitlesBySlugs(ctx context.Context, slugs []string) (map[string][2]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT slug, title, exam_name FROM vaultcore.mocks WHERE slug = ANY($1)
+	`, pq.Array(slugs))
+	if err != nil {
+		return nil, fmt.Errorf("mock titles by slugs: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][2]string, len(slugs))
+	for rows.Next() {
+		var slug, title, examName string
+		if err := rows.Scan(&slug, &title, &examName); err != nil {
+			return nil, err
+		}
+		out[slug] = [2]string{title, examName}
+	}
+	return out, rows.Err()
 }
 
 func (r *PostgresRepository) GetNextAttemptNumber(ctx context.Context, userID, examSlug, mockSlug, paperSlug string) (int, error) {

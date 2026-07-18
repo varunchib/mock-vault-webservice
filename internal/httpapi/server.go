@@ -105,6 +105,26 @@ const (
 	liveGlobalZKey  = "live:attempts"
 )
 
+// Visit tracking (all Redis, no Postgres writes):
+//
+//	presenceZKey            → ZSET member userID, score = last-seen unix; the
+//	                          admin "live users" count = members seen <5 min ago
+//	visitsRecentPrefix + id → LIST of JSON {type, slug, at}, newest first,
+//	                          trimmed to 10, 24h TTL — "recently visited"
+//	visitsTopPrefix + month → ZSET member "type:slug", score = visit count for
+//	                          that calendar month, ~40-day TTL — top-visited graph
+const (
+	presenceZKey       = "presence:users"
+	presenceWindow     = 5 * time.Minute
+	visitsRecentPrefix = "visits:recent:"
+	visitsRecentTTL    = 24 * time.Hour
+	visitsRecentMax    = 10
+	visitsTopPrefix    = "visits:top:"
+	visitsTopTTL       = 40 * 24 * time.Hour
+)
+
+func visitsTopKey(t time.Time) string { return visitsTopPrefix + t.UTC().Format("2006-01") }
+
 func liveAttemptRedisKey(userID, paperSlug string) string {
 	return "live:attempt:" + userID + ":" + paperSlug
 }
@@ -318,6 +338,9 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/activity/attempt/active", s.withAuth(http.HandlerFunc(s.handleGetActiveLiveAttempts), false))
 	s.mux.Handle("POST /api/v1/activity/attempt/submit", s.withAuth(http.HandlerFunc(s.handleSubmitLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/analytics/leaderboard", s.withAuth(http.HandlerFunc(s.handleExamLeaderboard), false))
+	s.mux.Handle("POST /api/v1/activity/visit", s.withAuth(http.HandlerFunc(s.handleRecordVisit), false))
+	s.mux.Handle("GET /api/v1/activity/recent-visits", s.withAuth(http.HandlerFunc(s.handleRecentVisits), false))
+	s.mux.Handle("GET /api/v1/admin/top-visited", s.withAuth(http.HandlerFunc(s.handleAdminTopVisited), true))
 	s.mux.Handle("GET /api/v1/analytics/score-distribution",
 		s.cachedPublicKey(60*time.Second, func(r *http.Request) string {
 			return "scoredist:" + strings.TrimSpace(r.URL.Query().Get("examSlug"))
@@ -1190,6 +1213,18 @@ func (s *Server) withAuth(next http.Handler, adminOnly bool) http.Handler {
 		if adminOnly && user.Role != "admin" {
 			s.respondError(w, http.StatusForbidden, "Forbidden")
 			return
+		}
+
+		// Presence heartbeat: every authenticated request stamps the user in a
+		// ZSET (score = unix now). The admin "live users" count reads users
+		// seen in the last 5 minutes — actual activity, not just an open
+		// attempt timer. Fire-and-forget; never blocks the request.
+		if s.rdb != nil {
+			go func(uid string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = s.rdb.ZAdd(ctx, presenceZKey, redis.Z{Score: float64(time.Now().Unix()), Member: uid}).Err()
+			}(user.ID)
 		}
 
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authUserKey, user)))
@@ -2149,24 +2184,174 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAdminActiveCount reports users active in the last 5 minutes, based on
+// the presence heartbeat every authenticated request writes. The old logic
+// counted users with a non-expired timed attempt — invisible browsers and
+// abandoned-but-unexpired attempts made that number wrong in both directions.
 func (s *Server) handleAdminActiveCount(w http.ResponseWriter, r *http.Request) {
-	users := map[string]struct{}{}
+	count := 0
 	if s.rdb != nil {
-		now := time.Now().Unix()
-		// Non-expired members only (score >= now), from the global ZSET — no SCAN.
-		members, err := s.rdb.ZRangeByScore(r.Context(), liveGlobalZKey, &redis.ZRangeBy{
-			Min: strconv.FormatInt(now, 10),
-			Max: "+inf",
-		}).Result()
-		if err == nil {
-			for _, m := range members {
-				if uid, _, ok := splitLiveMember(m); ok {
-					users[uid] = struct{}{}
-				}
+		cutoff := time.Now().Add(-presenceWindow).Unix()
+		// Prune stale members so the ZSET stays tiny, then count the rest.
+		_ = s.rdb.ZRemRangeByScore(r.Context(), presenceZKey, "-inf", strconv.FormatInt(cutoff-1, 10)).Err()
+		if n, err := s.rdb.ZCount(r.Context(), presenceZKey, strconv.FormatInt(cutoff, 10), "+inf").Result(); err == nil {
+			count = int(n)
+		}
+	}
+	s.respondJSON(w, http.StatusOK, map[string]int{"count": count})
+}
+
+// ── Content visit tracking (papers & mocks) ──────────────────────────────
+
+type visitEntry struct {
+	Type string `json:"type"`
+	Slug string `json:"slug"`
+	At   string `json:"at"`
+}
+
+func (s *Server) handleRecordVisit(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if s.rdb == nil {
+		s.respondJSON(w, http.StatusOK, map[string]string{"message": "ok"})
+		return
+	}
+	var req struct {
+		Type string `json:"type"`
+		Slug string `json:"slug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	req.Slug = strings.TrimSpace(req.Slug)
+	if (req.Type != "paper" && req.Type != "mock") || req.Slug == "" || len(req.Slug) > 200 {
+		s.respondError(w, http.StatusBadRequest, "type must be paper|mock and slug is required")
+		return
+	}
+
+	entry, _ := json.Marshal(visitEntry{Type: req.Type, Slug: req.Slug, At: time.Now().UTC().Format(time.RFC3339)})
+	recentKey := visitsRecentPrefix + user.ID
+	ctx := r.Context()
+	pipe := s.rdb.TxPipeline()
+	pipe.LPush(ctx, recentKey, entry)
+	pipe.LTrim(ctx, recentKey, 0, visitsRecentMax-1)
+	pipe.Expire(ctx, recentKey, visitsRecentTTL)
+	topKey := visitsTopKey(time.Now())
+	pipe.ZIncrBy(ctx, topKey, 1, req.Type+":"+req.Slug)
+	pipe.Expire(ctx, topKey, visitsTopTTL)
+	_, _ = pipe.Exec(ctx)
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "ok"})
+}
+
+// resolveVisitTitles maps "type:slug" pairs to display titles via the DB.
+func (s *Server) resolveVisitTitles(ctx context.Context, entries []visitEntry) map[string][2]string {
+	paperSlugs := make([]string, 0, len(entries))
+	mockSlugs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "paper" {
+			paperSlugs = append(paperSlugs, e.Slug)
+		} else {
+			mockSlugs = append(mockSlugs, e.Slug)
+		}
+	}
+	out := make(map[string][2]string)
+	if len(paperSlugs) > 0 {
+		if titles, err := s.repo.GetPaperTitlesBySlugs(ctx, paperSlugs); err == nil {
+			for slug, t := range titles {
+				out["paper:"+slug] = t
 			}
 		}
 	}
-	s.respondJSON(w, http.StatusOK, map[string]int{"count": len(users)})
+	if len(mockSlugs) > 0 {
+		if titles, err := s.repo.GetMockTitlesBySlugs(ctx, mockSlugs); err == nil {
+			for slug, t := range titles {
+				out["mock:"+slug] = t
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) handleRecentVisits(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	type visitOut struct {
+		Type     string `json:"type"`
+		Slug     string `json:"slug"`
+		Title    string `json:"title"`
+		ExamName string `json:"examName"`
+		At       string `json:"at"`
+	}
+	visits := []visitOut{}
+	if s.rdb != nil {
+		raw, err := s.rdb.LRange(r.Context(), visitsRecentPrefix+user.ID, 0, visitsRecentMax-1).Result()
+		if err == nil {
+			entries := make([]visitEntry, 0, len(raw))
+			seen := map[string]struct{}{}
+			for _, item := range raw {
+				var e visitEntry
+				if json.Unmarshal([]byte(item), &e) != nil {
+					continue
+				}
+				key := e.Type + ":" + e.Slug
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				entries = append(entries, e)
+			}
+			titles := s.resolveVisitTitles(r.Context(), entries)
+			for _, e := range entries {
+				t := titles[e.Type+":"+e.Slug]
+				if t[0] == "" {
+					continue // content deleted since the visit
+				}
+				visits = append(visits, visitOut{Type: e.Type, Slug: e.Slug, Title: t[0], ExamName: t[1], At: e.At})
+			}
+		}
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"visits": visits})
+}
+
+func (s *Server) handleAdminTopVisited(w http.ResponseWriter, r *http.Request) {
+	type topOut struct {
+		Type     string `json:"type"`
+		Slug     string `json:"slug"`
+		Title    string `json:"title"`
+		ExamName string `json:"examName"`
+		Visits   int    `json:"visits"`
+	}
+	top := []topOut{}
+	if s.rdb != nil {
+		members, err := s.rdb.ZRevRangeWithScores(r.Context(), visitsTopKey(time.Now()), 0, 4).Result()
+		if err == nil {
+			entries := make([]visitEntry, 0, len(members))
+			for _, m := range members {
+				if str, ok := m.Member.(string); ok {
+					if typ, slug, found := strings.Cut(str, ":"); found {
+						entries = append(entries, visitEntry{Type: typ, Slug: slug})
+					}
+				}
+			}
+			titles := s.resolveVisitTitles(r.Context(), entries)
+			for i, e := range entries {
+				t := titles[e.Type+":"+e.Slug]
+				if t[0] == "" {
+					continue
+				}
+				top = append(top, topOut{Type: e.Type, Slug: e.Slug, Title: t[0], ExamName: t[1], Visits: int(members[i].Score)})
+			}
+		}
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"month": time.Now().UTC().Format("2006-01"), "top": top})
 }
 
 func (s *Server) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
