@@ -449,7 +449,7 @@ var paperCanonicalSlug = map[string]string{
 // sitemapGuideSlugs are the editorial /guide/:slug pages (rendered by the Worker).
 // Keep in sync with the keys of postGuides in mock-vault-webapp/src/data/postGuides.ts.
 var sitemapGuideSlugs = []string{
-	"jkpsi", "upsc-cse", "ssc-cgl", "bpsc", "ibps-po", "jkpsc", "rssb", "jkssb", "neet-ug",
+	"jkpsi", "jkpsi-telecom", "upsc-cse", "ssc-cgl", "bpsc", "ibps-po", "jkpsc", "rssb", "jkssb", "neet-ug",
 	"jkssb-patwari", "jkssb-junior-assistant", "jkssb-faa", "jkssb-wildlife-guard", "jkssb-veterinary-pharmacist",
 }
 
