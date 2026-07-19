@@ -1649,6 +1649,33 @@ func (r *PostgresRepository) GetAdminUserByID(ctx context.Context, id string) (m
 	return u, nil
 }
 
+// GetAdminUsersByIDs fetches several users in one round-trip. Used by the
+// live-users panel, which resolves up to 20 presence IDs at once. Returned
+// order is unspecified — the caller re-orders by last-seen.
+func (r *PostgresRepository) GetAdminUsersByIDs(ctx context.Context, ids []string) ([]models.AdminUser, error) {
+	if len(ids) == 0 {
+		return []models.AdminUser{}, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, email, name, role, is_active, created_at, last_login, COALESCE(city, '')
+		FROM vaultcore.users
+		WHERE id = ANY($1)
+	`, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("get admin users by ids: %w", err)
+	}
+	defer rows.Close()
+	users := make([]models.AdminUser, 0, len(ids))
+	for rows.Next() {
+		var u models.AdminUser
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin, &u.City); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 // ListUserAttemptsDetailed returns a user's most recent scored attempts (papers + mocks).
 func (r *PostgresRepository) ListUserAttemptsDetailed(ctx context.Context, userID string, limit int) ([]models.AdminUserAttempt, error) {
 	rows, err := r.db.QueryContext(ctx, `

@@ -217,10 +217,34 @@ type AdminUserExamRank struct {
 }
 
 // AdminUserDetail is the full profile an admin sees when opening a user.
+// RecentVisit is one entry of a user's "recently visited" log (Redis-backed,
+// newest first). Shown to the user on their dashboard and to admins on the
+// user-detail view.
+type RecentVisit struct {
+	Type     string `json:"type"` // "paper" | "mock"
+	Slug     string `json:"slug"`
+	Title    string `json:"title"`
+	ExamName string `json:"examName"`
+	At       string `json:"at"`
+}
+
+// AdminActiveUser is one row of the live-users panel (opened from the green
+// presence dot): who is online now and what they were just looking at.
+type AdminActiveUser struct {
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Email        string        `json:"email"`
+	City         string        `json:"city,omitempty"`
+	LastSeen     string        `json:"lastSeen"`
+	SecondsAgo   int64         `json:"secondsAgo"`
+	RecentVisits []RecentVisit `json:"recentVisits"`
+}
+
 type AdminUserDetail struct {
-	User      AdminUser           `json:"user"`
-	Attempts  []AdminUserAttempt  `json:"attempts"`
-	ExamRanks []AdminUserExamRank `json:"examRanks"`
+	User         AdminUser           `json:"user"`
+	Attempts     []AdminUserAttempt  `json:"attempts"`
+	ExamRanks    []AdminUserExamRank `json:"examRanks"`
+	RecentVisits []RecentVisit       `json:"recentVisits"`
 }
 
 // AdminAnalyticsSubject mirrors the frontend SubjectResult shape.

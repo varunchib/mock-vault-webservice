@@ -110,15 +110,21 @@ const (
 //	presenceZKey            → ZSET member userID, score = last-seen unix; the
 //	                          admin "live users" count = members seen <5 min ago
 //	visitsRecentPrefix + id → LIST of JSON {type, slug, at}, newest first,
-//	                          trimmed to 10, 24h TTL — "recently visited"
+//	                          trimmed to 15, 7-day TTL — "recently visited"
 //	visitsTopPrefix + month → ZSET member "type:slug", score = visit count for
 //	                          that calendar month, ~40-day TTL — top-visited graph
 const (
-	presenceZKey       = "presence:users"
-	presenceWindow     = 5 * time.Minute
-	visitsRecentPrefix = "visits:recent:"
-	visitsRecentTTL    = 24 * time.Hour
-	visitsRecentMax    = 10
+	presenceZKey   = "presence:users"
+	presenceWindow = 5 * time.Minute
+	// adminActiveUsersMax caps the live-users panel opened from the green dot.
+	adminActiveUsersMax = 20
+	visitsRecentPrefix  = "visits:recent:"
+	// 7 days, not 24h: the TTL is refreshed on every visit, so this means "kept
+	// for 7 days after the user's last activity". Admins inspecting a user need
+	// multi-day recall — with 24h, clicking anyone idle since yesterday showed an
+	// empty list and read as a broken feature. ~15 entries x ~70B = ~1KB/user.
+	visitsRecentTTL = 7 * 24 * time.Hour
+	visitsRecentMax = 15
 	visitsTopPrefix    = "visits:top:"
 	visitsTopTTL       = 40 * 24 * time.Hour
 )
@@ -368,6 +374,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("GET /api/v1/admin/users/{id}/detail", s.withAuth(http.HandlerFunc(s.handleAdminUserDetail), true))
 	s.mux.Handle("GET /api/v1/admin/users/{id}/analytics", s.withAuth(http.HandlerFunc(s.handleAdminUserAnalytics), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
+	s.mux.Handle("GET /api/v1/admin/active-users", s.withAuth(http.HandlerFunc(s.handleAdminActiveUsers), true))
 	s.mux.Handle("GET /api/v1/admin/audit", s.withAuth(http.HandlerFunc(s.handleListAudit), true))
 	s.mux.Handle("POST /api/v1/admin/indexnow/submit-all", s.withAuth(http.HandlerFunc(s.handleIndexNowSubmitAll), true))
 
@@ -2288,48 +2295,113 @@ func (s *Server) resolveVisitTitles(ctx context.Context, entries []visitEntry) m
 	return out
 }
 
+// recentVisitsForUser reads a user's "recently visited" log from Redis, newest
+// first, de-duplicated by content, with display titles resolved from the DB.
+// Shared by the user's own endpoint and the admin user-detail view so the two
+// can never drift apart.
+func (s *Server) recentVisitsForUser(ctx context.Context, userID string) []models.RecentVisit {
+	visits := []models.RecentVisit{}
+	if s.rdb == nil || userID == "" {
+		return visits
+	}
+	raw, err := s.rdb.LRange(ctx, visitsRecentPrefix+userID, 0, visitsRecentMax-1).Result()
+	if err != nil {
+		return visits
+	}
+	entries := make([]visitEntry, 0, len(raw))
+	seen := map[string]struct{}{}
+	for _, item := range raw {
+		var e visitEntry
+		if json.Unmarshal([]byte(item), &e) != nil {
+			continue
+		}
+		key := e.Type + ":" + e.Slug
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		entries = append(entries, e)
+	}
+	titles := s.resolveVisitTitles(ctx, entries)
+	for _, e := range entries {
+		t := titles[e.Type+":"+e.Slug]
+		if t[0] == "" {
+			continue // content deleted since the visit
+		}
+		visits = append(visits, models.RecentVisit{Type: e.Type, Slug: e.Slug, Title: t[0], ExamName: t[1], At: e.At})
+	}
+	return visits
+}
+
 func (s *Server) handleRecentVisits(w http.ResponseWriter, r *http.Request) {
 	user, ok := userFromContext(r.Context())
 	if !ok {
 		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
-	type visitOut struct {
-		Type     string `json:"type"`
-		Slug     string `json:"slug"`
-		Title    string `json:"title"`
-		ExamName string `json:"examName"`
-		At       string `json:"at"`
+	s.respondJSON(w, http.StatusOK, map[string]any{"visits": s.recentVisitsForUser(r.Context(), user.ID)})
+}
+
+// handleAdminActiveUsers backs the live-users panel opened from the green dot:
+// who is online right now, most recently seen first, capped at 20.
+func (s *Server) handleAdminActiveUsers(w http.ResponseWriter, r *http.Request) {
+	users := []models.AdminActiveUser{}
+	if s.rdb == nil {
+		s.respondJSON(w, http.StatusOK, map[string]any{"users": users, "count": 0})
+		return
 	}
-	visits := []visitOut{}
-	if s.rdb != nil {
-		raw, err := s.rdb.LRange(r.Context(), visitsRecentPrefix+user.ID, 0, visitsRecentMax-1).Result()
-		if err == nil {
-			entries := make([]visitEntry, 0, len(raw))
-			seen := map[string]struct{}{}
-			for _, item := range raw {
-				var e visitEntry
-				if json.Unmarshal([]byte(item), &e) != nil {
-					continue
-				}
-				key := e.Type + ":" + e.Slug
-				if _, dup := seen[key]; dup {
-					continue
-				}
-				seen[key] = struct{}{}
-				entries = append(entries, e)
-			}
-			titles := s.resolveVisitTitles(r.Context(), entries)
-			for _, e := range entries {
-				t := titles[e.Type+":"+e.Slug]
-				if t[0] == "" {
-					continue // content deleted since the visit
-				}
-				visits = append(visits, visitOut{Type: e.Type, Slug: e.Slug, Title: t[0], ExamName: t[1], At: e.At})
-			}
+	ctx := r.Context()
+	cutoff := strconv.FormatInt(time.Now().Add(-presenceWindow).Unix(), 10)
+	_ = s.rdb.ZRemRangeByScore(ctx, presenceZKey, "-inf", "("+cutoff).Err()
+	// Rev order = most recently seen first. Score is the last-seen unix stamp.
+	members, err := s.rdb.ZRevRangeByScoreWithScores(ctx, presenceZKey, &redis.ZRangeBy{
+		Min: cutoff, Max: "+inf", Offset: 0, Count: adminActiveUsersMax,
+	}).Result()
+	if err != nil {
+		s.respondJSON(w, http.StatusOK, map[string]any{"users": users, "count": 0})
+		return
+	}
+	ids := make([]string, 0, len(members))
+	lastSeen := make(map[string]int64, len(members))
+	for _, m := range members {
+		id, _ := m.Member.(string)
+		if id == "" {
+			continue
 		}
+		ids = append(ids, id)
+		lastSeen[id] = int64(m.Score)
 	}
-	s.respondJSON(w, http.StatusOK, map[string]any{"visits": visits})
+	if len(ids) == 0 {
+		s.respondJSON(w, http.StatusOK, map[string]any{"users": users, "count": 0})
+		return
+	}
+	// One batched query — not 20 round-trips.
+	found, err := s.repo.GetAdminUsersByIDs(ctx, ids)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to fetch active users")
+		return
+	}
+	byID := make(map[string]models.AdminUser, len(found))
+	for _, u := range found {
+		byID[u.ID] = u
+	}
+	// Iterate ids (not the map) to preserve most-recently-seen ordering.
+	for _, id := range ids {
+		u, ok := byID[id]
+		if !ok {
+			continue // user deleted since their last request
+		}
+		users = append(users, models.AdminActiveUser{
+			ID:           u.ID,
+			Name:         u.Name,
+			Email:        u.Email,
+			City:         u.City,
+			LastSeen:     time.Unix(lastSeen[id], 0).UTC().Format(time.RFC3339),
+			SecondsAgo:   time.Now().Unix() - lastSeen[id],
+			RecentVisits: s.recentVisitsForUser(ctx, id),
+		})
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"users": users, "count": len(users)})
 }
 
 func (s *Server) handleAdminTopVisited(w http.ResponseWriter, r *http.Request) {
@@ -2394,6 +2466,8 @@ func (s *Server) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 		User:      user,
 		Attempts:  attempts,
 		ExamRanks: ranks,
+		// Redis-backed, so this costs no extra Postgres work.
+		RecentVisits: s.recentVisitsForUser(r.Context(), id),
 	})
 }
 
