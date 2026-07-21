@@ -571,6 +571,10 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 			loc = "/mock-test/" + e.Slug
 			freq = "monthly"
 			pri = 0.8
+		case "question":
+			loc = "/question/" + e.Slug
+			freq = "monthly"
+			pri = 0.6
 		default:
 			continue
 		}

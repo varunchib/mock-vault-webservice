@@ -1832,6 +1832,16 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		FROM vaultcore.mocks m
 		WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
 		GROUP BY m.exam_slug
+		UNION ALL
+		-- Individual solved-question pages. Gate matches the old build-time
+		-- static generator: the question must belong to an indexable paper
+		-- (>= 5 questions) AND carry a real explanation (>= 300 chars), so we
+		-- never list thin question pages that Google would mark as Soft 404.
+		SELECT 'question', q.slug, q.updated_at
+		FROM vaultcore.questions q
+		WHERE q.paper_slug IS NOT NULL
+		  AND length(trim(q.explanation)) >= 300
+		  AND (SELECT count(*) FROM vaultcore.questions q2 WHERE q2.paper_slug = q.paper_slug) >= 5
 		ORDER BY 1, 2
 	`)
 	if err != nil {
