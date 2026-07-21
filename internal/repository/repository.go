@@ -1833,14 +1833,17 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
 		GROUP BY m.exam_slug
 		UNION ALL
-		-- Individual solved-question pages. Gate matches the old build-time
-		-- static generator: the question must belong to an indexable paper
-		-- (>= 5 questions) AND carry a real explanation (>= 300 chars), so we
-		-- never list thin question pages that Google would mark as Soft 404.
+		-- Individual solved-question pages. The question must belong to an
+		-- indexable paper (>= 5 questions) and carry a real explanation. The
+		-- threshold is 100 chars, not the old 300: a solved-MCQ page also has
+		-- the question, four options, the correct answer, subject and tags, so
+		-- a one-sentence explanation is still a substantial, unique page. 300
+		-- was dropping ~1,100 legitimate pages; 100 keeps everything except the
+		-- handful of true one-line stubs that Google could flag as thin.
 		SELECT 'question', q.slug, q.updated_at
 		FROM vaultcore.questions q
 		WHERE q.paper_slug IS NOT NULL
-		  AND length(trim(q.explanation)) >= 300
+		  AND length(trim(q.explanation)) >= 100
 		  AND (SELECT count(*) FROM vaultcore.questions q2 WHERE q2.paper_slug = q.paper_slug) >= 5
 		ORDER BY 1, 2
 	`)
