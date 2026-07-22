@@ -1827,12 +1827,15 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		FROM vaultcore.papers p
 		WHERE (SELECT count(*) FROM vaultcore.questions q WHERE q.paper_slug = p.slug) >= 5
 		UNION ALL
-		-- Only mock hubs whose mocks actually contain questions.
-		SELECT 'mock_exam', m.exam_slug, MAX(m.updated_at)
-		FROM vaultcore.mocks m
-		WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
-		GROUP BY m.exam_slug
-		UNION ALL
+		-- Mock hubs are intentionally omitted while the Mocks feature is gated
+		-- ("coming soon") in the app: a /mock-test page cannot be attempted yet,
+		-- so it must not be advertised for indexing (the Worker also serves it
+		-- noindex). Re-enable this block when mocks launch:
+		--   SELECT 'mock_exam', m.exam_slug, MAX(m.updated_at)
+		--   FROM vaultcore.mocks m
+		--   WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
+		--   GROUP BY m.exam_slug
+		--   UNION ALL
 		-- Individual solved-question pages. The question must belong to an
 		-- indexable paper (>= 5 questions) and carry a real explanation. The
 		-- threshold is 100 chars, not the old 300: a solved-MCQ page also has
