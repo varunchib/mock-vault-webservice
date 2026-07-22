@@ -460,6 +460,12 @@ var sitemapGuideSlugs = []string{
 	"jkssb-patwari", "jkssb-junior-assistant", "jkssb-faa", "jkssb-wildlife-guard", "jkssb-veterinary-pharmacist",
 }
 
+// sitemapBlogSlugs are the editorial /blog/:slug articles (rendered by the Worker).
+// Keep in sync with the keys of blogPosts in mock-vault-webapp/src/data/blogPosts.ts.
+var sitemapBlogSlugs = []string{
+	"ibps-po-exam",
+}
+
 // canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
 func canonicalPyqSlug(slug string) string {
 	if c, ok := paperCanonicalSlug[slug]; ok {
@@ -592,6 +598,13 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 	for _, slug := range sitemapGuideSlugs {
 		fmt.Fprintf(&buf,
 			"  <url>\n    <loc>%s/guide/%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
+			base, slug)
+	}
+
+	// Editorial blog articles (not in the DB — rendered by the Worker).
+	for _, slug := range sitemapBlogSlugs {
+		fmt.Fprintf(&buf,
+			"  <url>\n    <loc>%s/blog/%s</loc>\n    <changefreq>weekly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
 			base, slug)
 	}
 
@@ -1651,6 +1664,9 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	}
 	for _, g := range sitemapGuideSlugs {
 		paths = append(paths, "/guide/"+g)
+	}
+	for _, b := range sitemapBlogSlugs {
+		paths = append(paths, "/blog/"+b)
 	}
 
 	// Question pages are only worth a crawl once they carry a real solution.
