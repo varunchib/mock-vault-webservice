@@ -21,6 +21,13 @@ type Exam struct {
 	// for a top-level exam. The column, its FK and its index already existed;
 	// exposing it lets clients stop inferring the hierarchy from slug prefixes.
 	BoardSlug string `json:"boardSlug,omitempty"`
+	// ChildExamCount is how many exams name this one as their board_slug — i.e.
+	// how many sub-exams sit under it. 0 = a standalone exam. Exactly 1 = a "thin"
+	// board: its page aggregates a single sub-exam, so it is a near-duplicate of
+	// that sub-exam's page and must stay out of the index (Worker serves it
+	// noindex, sitemap skips it) until a second sub-exam is added and it becomes a
+	// genuine hub. >= 2 = an indexable board hub.
+	ChildExamCount int `json:"childExamCount"`
 }
 
 type QuestionOption struct {

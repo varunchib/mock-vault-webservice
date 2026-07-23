@@ -83,7 +83,11 @@ const examSelectSQL = `
 	  -- tab never shows.
 	  (SELECT count(*) FROM vaultcore.mocks mk WHERE mk.exam_slug = e.slug),
 	  COALESCE(e.subjects, '[]'::jsonb),
-	  COALESCE(e.board_slug, '')
+	  COALESCE(e.board_slug, ''),
+	  -- How many sub-exams sit under this one. Lets clients tell a standalone exam
+	  -- (0) from a thin board (1, a near-duplicate of its lone child → noindex)
+	  -- from a real hub (>= 2). Cheap: idx_exams_board_slug.
+	  (SELECT count(*) FROM vaultcore.exams c WHERE c.board_slug = e.slug)
 	FROM vaultcore.exams e`
 
 func (r *PostgresRepository) ListExams(ctx context.Context) ([]models.Exam, error) {
@@ -888,6 +892,7 @@ func scanExam(row rowScanner) (models.Exam, error) {
 		&exam.Mocks,
 		&subjectsRaw,
 		&exam.BoardSlug,
+		&exam.ChildExamCount,
 	); err != nil {
 		return models.Exam{}, err
 	}
@@ -1817,9 +1822,20 @@ func (r *PostgresRepository) ListAuditLog(ctx context.Context, limit int) ([]mod
 
 func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapEntry, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT 'exam', slug, updated_at
-		FROM vaultcore.exams
-		WHERE papers > 0 OR mocks > 0 OR slug IN ('jkssb', 'ssc-cgl', 'upsc-cse', 'ibps-po', 'bpsc', 'rssb', 'jkpsc')
+		-- Exam hubs. Include an exam that has real content of its own OR rolled up
+		-- from its sub-exams (counted, so the drifting stored papers column can't
+		-- leak). Skip a THIN board — one with exactly ONE sub-exam — because its
+		-- page just aggregates that lone child and is a near-duplicate of it; it
+		-- stays out of the index until a 2nd sub-exam makes it a genuine hub. This
+		-- replaces the old hand-kept allowlist and is fully automatic: add a second
+		-- exam under a board and it starts appearing here on the next rebuild.
+		SELECT 'exam', e.slug, e.updated_at
+		FROM vaultcore.exams e
+		WHERE ((SELECT count(*) FROM vaultcore.papers p
+		          WHERE p.exam_slug = e.slug
+		             OR p.exam_slug IN (SELECT s.slug FROM vaultcore.exams s WHERE s.board_slug = e.slug)) >= 1
+		    OR (SELECT count(*) FROM vaultcore.mocks mk WHERE mk.exam_slug = e.slug) >= 1)
+		  AND (SELECT count(*) FROM vaultcore.exams c WHERE c.board_slug = e.slug) <> 1
 		UNION ALL
 		-- Skip near-empty papers (too thin to index → Google marks them Soft 404).
 		-- Count real question rows, not the stored column, so stale counts can't leak.
