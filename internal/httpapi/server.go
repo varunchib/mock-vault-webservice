@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2611,10 +2612,9 @@ const (
 	inboxUserPrefix   = "inbox:user:"
 	inboxIndexKey     = "inbox:index"
 	inboxRLPrefix     = "inbox:rl:"
-	inboxTTL          = 48 * time.Hour // 2 days, auto-deleted by Redis
+	inboxTTL          = 7 * 24 * time.Hour // 7 days, auto-deleted by Redis
 	inboxMaxText      = 500
-	inboxNewPerHour   = 3  // max new threads per user per hour
-	inboxMsgPerHour   = 10 // max follow-up messages per user per hour
+	inboxMsgPerHour   = 30 // max messages per user per hour (single chat)
 )
 
 var threadIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -2656,6 +2656,43 @@ func (s *Server) inboxLoad(ctx context.Context, id string) (*models.InboxThread,
 	return &t, nil
 }
 
+// lastMsgTime is when the thread last had activity — used to order chats.
+func lastMsgTime(t *models.InboxThread) time.Time {
+	if n := len(t.Messages); n > 0 {
+		return t.Messages[n-1].CreatedAt
+	}
+	return t.CreatedAt
+}
+
+// getUserThread returns the user's single support chat (the most recently
+// active one if legacy duplicates exist), or nil if they have none yet. It
+// prunes any stale/foreign ids from the user's set as it goes.
+func (s *Server) getUserThread(ctx context.Context, userID string) *models.InboxThread {
+	ids, err := s.rdb.SMembers(ctx, inboxUserPrefix+userID).Result()
+	if err != nil {
+		return nil
+	}
+	var latest *models.InboxThread
+	for _, id := range ids {
+		if !threadIDRe.MatchString(id) {
+			s.rdb.SRem(ctx, inboxUserPrefix+userID, id)
+			continue
+		}
+		t, err := s.inboxLoad(ctx, id)
+		if err != nil {
+			s.rdb.SRem(ctx, inboxUserPrefix+userID, id)
+			continue
+		}
+		if t.UserID != userID {
+			continue
+		}
+		if latest == nil || lastMsgTime(t).After(lastMsgTime(latest)) {
+			latest = t
+		}
+	}
+	return latest
+}
+
 func (s *Server) inboxSave(ctx context.Context, t *models.InboxThread) error {
 	data, err := json.Marshal(t)
 	if err != nil {
@@ -2678,10 +2715,7 @@ func (s *Server) handleInboxCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Text       string `json:"text"`
-		ExamSlug   string `json:"examSlug"`
-		ExamName   string `json:"examName"`
-		SearchTerm string `json:"searchTerm"`
+		Text string `json:"text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
@@ -2694,26 +2728,30 @@ func (s *Server) handleInboxCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit: 3 new threads per user per hour
-	if allowed, _ := s.checkRateLimit(r.Context(), inboxRLPrefix+"new:"+user.ID, inboxNewPerHour, time.Hour); !allowed {
-		s.respondError(w, http.StatusTooManyRequests, "Too many suggestions — try again later")
+	// One support chat per user, WhatsApp-style: append to the existing thread
+	// if there is one, otherwise start the single thread. Never spawn a new one.
+	if allowed, _ := s.checkRateLimit(r.Context(), inboxRLPrefix+"msg:"+user.ID, inboxMsgPerHour, time.Hour); !allowed {
+		s.respondError(w, http.StatusTooManyRequests, "Sending too fast — please wait")
 		return
 	}
 
 	now := time.Now().UTC()
-	thread := &models.InboxThread{
-		ID:         newInboxID(),
-		UserID:     user.ID,
-		UserName:   user.Name,
-		UserEmail:  user.Email,
-		ExamSlug:   sanitizeInbox(req.ExamSlug),
-		ExamName:   sanitizeInbox(req.ExamName),
-		SearchTerm: sanitizeInbox(req.SearchTerm),
-		Messages: []models.InboxMessage{{
-			ID: newInboxID(), From: "user", Text: text, CreatedAt: now,
-		}},
-		CreatedAt: now,
-		Status:    "open",
+	msg := models.InboxMessage{ID: newInboxID(), From: "user", Text: text, CreatedAt: now}
+
+	thread := s.getUserThread(r.Context(), user.ID)
+	if thread == nil {
+		thread = &models.InboxThread{
+			ID:        newInboxID(),
+			UserID:    user.ID,
+			UserName:  user.Name,
+			UserEmail: user.Email,
+			Messages:  []models.InboxMessage{msg},
+			CreatedAt: now,
+			Status:    "open",
+		}
+	} else {
+		thread.Messages = append(thread.Messages, msg)
+		thread.Status = "open"
 	}
 
 	if err := s.inboxSave(r.Context(), thread); err != nil {
@@ -2731,28 +2769,13 @@ func (s *Server) handleInboxMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, err := s.rdb.SMembers(r.Context(), inboxUserPrefix+user.ID).Result()
-	if err != nil || len(ids) == 0 {
+	// Single support chat per user: return the one thread (or an empty list).
+	thread := s.getUserThread(r.Context(), user.ID)
+	if thread == nil {
 		s.respondJSON(w, http.StatusOK, []models.InboxThread{})
 		return
 	}
-
-	threads := make([]models.InboxThread, 0, len(ids))
-	for _, id := range ids {
-		if !threadIDRe.MatchString(id) {
-			continue
-		}
-		t, err := s.inboxLoad(r.Context(), id)
-		if err != nil {
-			s.rdb.SRem(r.Context(), inboxUserPrefix+user.ID, id)
-			continue
-		}
-		if t.UserID != user.ID {
-			continue // ownership check — never expose other users' threads
-		}
-		threads = append(threads, *t)
-	}
-	s.respondJSON(w, http.StatusOK, threads)
+	s.respondJSON(w, http.StatusOK, []models.InboxThread{*thread})
 }
 
 func (s *Server) handleInboxUserMessage(w http.ResponseWriter, r *http.Request) {
@@ -2817,6 +2840,7 @@ func (s *Server) handleAdminInboxList(w http.ResponseWriter, r *http.Request) {
 
 	threads := make([]models.InboxThread, 0, len(ids))
 	var stale []interface{}
+	seenUser := make(map[string]int) // userID → index in threads (dedupe to one chat/user)
 	for _, id := range ids {
 		if !threadIDRe.MatchString(id) {
 			stale = append(stale, id)
@@ -2827,11 +2851,23 @@ func (s *Server) handleAdminInboxList(w http.ResponseWriter, r *http.Request) {
 			stale = append(stale, id) // expired — clean index
 			continue
 		}
+		if idx, ok := seenUser[t.UserID]; ok {
+			// Legacy duplicate — keep whichever chat is more recently active.
+			if lastMsgTime(t).After(lastMsgTime(&threads[idx])) {
+				threads[idx] = *t
+			}
+			continue
+		}
+		seenUser[t.UserID] = len(threads)
 		threads = append(threads, *t)
 	}
 	if len(stale) > 0 {
 		s.rdb.ZRem(r.Context(), inboxIndexKey, stale...)
 	}
+	// Most recently active chats first.
+	sort.SliceStable(threads, func(i, j int) bool {
+		return lastMsgTime(&threads[i]).After(lastMsgTime(&threads[j]))
+	})
 	s.respondJSON(w, http.StatusOK, threads)
 }
 
