@@ -464,7 +464,9 @@ var sitemapGuideSlugs = []string{
 // sitemapBlogSlugs are the editorial /blog/:slug articles (rendered by the Worker).
 // Keep in sync with the keys of blogPosts in mock-vault-webapp/src/data/blogPosts.ts.
 var sitemapBlogSlugs = []string{
-	"ibps-po-exam",
+	"ibps-po-exam", "ssc-cgl-exam", "upsc-cse-exam", "neet-ug-exam", "bpsc-exam",
+	"jkpsc-jkcce-exam", "rssb-patwari-exam", "jkssb-sub-inspector-exam",
+	"jkssb-patwari-exam", "jkssb-junior-assistant-exam",
 }
 
 // canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
