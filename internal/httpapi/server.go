@@ -467,15 +467,6 @@ var sitemapBlogSlugs = []string{
 	"ibps-po-exam",
 }
 
-// sitemapOverviewSlugs are exams that have a real /exam/:slug/overview page
-// (examInfo content). Emitted independently of the exam-hub entries so that a
-// thin board (kept out of the hub sitemap, see ListSitemapEntries) still keeps
-// its distinct overview page indexed. jkpsi is intentionally excluded: it has no
-// exam row and no overview content, so its URL would redirect.
-var sitemapOverviewSlugs = []string{
-	"jkssb", "ssc-cgl", "upsc-cse", "ibps-po", "bpsc", "rssb", "jkpsc",
-}
-
 // canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
 func canonicalPyqSlug(slug string) string {
 	if c, ok := paperCanonicalSlug[slug]; ok {
@@ -586,14 +577,6 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 		fmt.Fprintf(&buf,
 			"  <url>\n    <loc>%s%s</loc>\n    <lastmod>%s</lastmod>\n    <changefreq>%s</changefreq>\n    <priority>%.1f</priority>\n  </url>\n",
 			base, loc, e.UpdatedAt.UTC().Format("2006-01-02"), freq, pri)
-	}
-
-	// Exam overview pages. Emitted from the curated list (not the exam entries) so
-	// a thin board whose hub is skipped still keeps its distinct /overview indexed.
-	for _, slug := range sitemapOverviewSlugs {
-		fmt.Fprintf(&buf,
-			"  <url>\n    <loc>%s/exam/%s/overview</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.9</priority>\n  </url>\n",
-			base, slug)
 	}
 
 	// Editorial guide pages (not in the DB — rendered by the Worker).
