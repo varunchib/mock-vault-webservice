@@ -182,7 +182,7 @@ func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (m
 
 func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		ORDER BY exam_name, year DESC,
 			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
@@ -206,7 +206,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 
 func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		-- Same rule as papers: a board aggregates its sub-exams' questions.
 		WHERE exam_slug = $1
@@ -233,7 +233,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 
 func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
 		ORDER BY
@@ -258,7 +258,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 
 func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
 		ORDER BY
@@ -283,9 +283,9 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 
 func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string) (models.Question, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb)
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
-		WHERE slug = $1
+		WHERE slug = $1 OR url_code = $1
 	`, slug)
 	question, err := scanQuestion(row)
 	if err != nil {
@@ -965,6 +965,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 		&tagsRaw,
 		&translationsRaw,
 		&imagesRaw,
+		&question.URLCode,
 	); err != nil {
 		return models.Question{}, err
 	}
@@ -1771,9 +1772,10 @@ func (r *PostgresRepository) UpdateUserStatus(ctx context.Context, id string, is
 
 // SitemapEntry is one URL row returned for sitemap generation.
 type SitemapEntry struct {
-	Kind      string // "exam" | "paper" | "mock_exam"
+	Kind      string // "exam" | "paper" | "mock_exam" | "question"
 	Slug      string
 	UpdatedAt time.Time
+	Title     string // question text (question kind only) — builds the keyword URL
 }
 
 // InsertAuditLog appends one entry to the admin audit trail. details may be nil.
@@ -1829,7 +1831,7 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		-- stays out of the index until a 2nd sub-exam makes it a genuine hub. This
 		-- replaces the old hand-kept allowlist and is fully automatic: add a second
 		-- exam under a board and it starts appearing here on the next rebuild.
-		SELECT 'exam', e.slug, e.updated_at
+		SELECT 'exam', e.slug, e.updated_at, ''::text AS title
 		FROM vaultcore.exams e
 		WHERE ((SELECT count(*) FROM vaultcore.papers p
 		          WHERE p.exam_slug = e.slug
@@ -1839,7 +1841,7 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		UNION ALL
 		-- Skip near-empty papers (too thin to index → Google marks them Soft 404).
 		-- Count real question rows, not the stored column, so stale counts can't leak.
-		SELECT 'paper', p.slug, p.updated_at
+		SELECT 'paper', p.slug, p.updated_at, ''::text AS title
 		FROM vaultcore.papers p
 		WHERE (SELECT count(*) FROM vaultcore.questions q WHERE q.paper_slug = p.slug) >= 5
 		UNION ALL
@@ -1859,7 +1861,7 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		-- a one-sentence explanation is still a substantial, unique page. 300
 		-- was dropping ~1,100 legitimate pages; 100 keeps everything except the
 		-- handful of true one-line stubs that Google could flag as thin.
-		SELECT 'question', q.slug, q.updated_at
+		SELECT 'question', COALESCE(q.url_code, substr(md5(q.slug), 1, 10)), q.updated_at, q.question
 		FROM vaultcore.questions q
 		WHERE q.paper_slug IS NOT NULL
 		  AND length(trim(q.explanation)) >= 100
@@ -1873,7 +1875,7 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 	var entries []SitemapEntry
 	for rows.Next() {
 		var e SitemapEntry
-		if err := rows.Scan(&e.Kind, &e.Slug, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.Kind, &e.Slug, &e.UpdatedAt, &e.Title); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)

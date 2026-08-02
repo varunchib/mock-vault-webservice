@@ -43,6 +43,7 @@ type QuestionTranslation struct {
 
 type Question struct {
 	Slug         string                         `json:"slug"`
+	URLCode      string                         `json:"urlCode,omitempty"`
 	ExamSlug     string                         `json:"examSlug"`
 	PaperSlug    string                         `json:"paperSlug,omitempty"`
 	ExamName     string                         `json:"examName"`

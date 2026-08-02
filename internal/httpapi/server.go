@@ -521,11 +521,56 @@ func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
 		}
 		if questions, err := s.repo.ListQuestionsByPaper(ctx, paperSlug); err == nil {
 			for _, q := range questions {
-				paths = append(paths, "/question/"+q.Slug)
+				paths = append(paths, questionURLPath(q.URLCode, q.Question))
 			}
 		}
 		s.submitIndexNowPaths(ctx, paths)
 	}()
+}
+
+var (
+	kwMath  = regexp.MustCompile(`\$[^$]*\$`)
+	kwAlnum = regexp.MustCompile(`[^a-z0-9]+`)
+	kwMarks = strings.NewReplacer("*", " ", "_", " ", "`", " ", "#", " ", ">", " ", "~", " ", "|", " ")
+)
+
+// keywordify mirrors src/lib/questionUrl.ts so the sitemap URL is byte-identical
+// to the Worker's canonical URL (no redirect chains). Builds the keyword part of
+// a question URL: /question/<keywords>--<id>.
+func keywordify(text string) string {
+	s := kwMath.ReplaceAllString(text, " ")
+	s = kwMarks.Replace(s)
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, "&", " and ")
+	s = kwAlnum.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return ""
+	}
+	kept := make([]string, 0, 12)
+	for _, p := range strings.Split(s, "-") {
+		if p == "" {
+			continue
+		}
+		kept = append(kept, p)
+		if len(kept) == 12 {
+			break
+		}
+	}
+	s = strings.Join(kept, "-")
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	return strings.Trim(s, "-")
+}
+
+// questionURLPath returns /question/<keywords>--<id> (or /question/<id> when the
+// text yields no keywords).
+func questionURLPath(slug, questionText string) string {
+	if kw := keywordify(questionText); kw != "" {
+		return "/question/" + kw + "--" + slug
+	}
+	return "/question/" + slug
 }
 
 func buildSitemapXML(entries []repository.SitemapEntry) []byte {
@@ -570,7 +615,7 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 			freq = "monthly"
 			pri = 0.8
 		case "question":
-			loc = "/question/" + e.Slug
+			loc = questionURLPath(e.Slug, e.Title)
 			freq = "monthly"
 			pri = 0.6
 		default:
@@ -1671,7 +1716,7 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	if questions, qerr := s.repo.ListQuestions(r.Context()); qerr == nil {
 		for _, q := range questions {
 			if len(strings.TrimSpace(q.Explanation)) >= minExplanation {
-				paths = append(paths, "/question/"+q.Slug)
+				paths = append(paths, questionURLPath(q.URLCode, q.Question))
 			} else {
 				skipped++
 			}
