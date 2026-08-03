@@ -459,6 +459,7 @@ var paperCanonicalSlug = map[string]string{
 var sitemapGuideSlugs = []string{
 	"jkpsi", "jkpsi-telecom", "upsc-cse", "ssc-cgl", "bpsc", "ibps-po", "jkpsc", "rssb", "jkssb", "neet-ug",
 	"jkssb-patwari", "jkssb-junior-assistant", "jkssb-faa", "jkssb-wildlife-guard", "jkssb-veterinary-pharmacist",
+	"jkssb-constable", "jkssb-constable-telecom",
 }
 
 // sitemapBlogSlugs are the editorial /blog/:slug articles (rendered by the Worker).
