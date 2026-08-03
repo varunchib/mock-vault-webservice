@@ -467,7 +467,6 @@ var sitemapGuideSlugs = []string{
 var sitemapBlogSlugs = []string{
 	"ibps-po-exam", "ssc-cgl-exam", "upsc-cse-exam", "neet-ug-exam", "bpsc-exam",
 	"jkpsc-jkcce-exam", "rssb-patwari-exam", "jkssb-sub-inspector-exam",
-	"jkssb-patwari-exam", "jkssb-junior-assistant-exam",
 }
 
 // canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
