@@ -61,6 +61,18 @@ type Question struct {
 	Translations map[string]QuestionTranslation `json:"translations,omitempty"`
 }
 
+// RelatedQuestion is the trimmed shape used for "Related questions" links. It
+// deliberately omits options, answer and explanation: six full questions would
+// roughly triple the payload of every question page for text nobody reads.
+type RelatedQuestion struct {
+	URLCode  string `json:"urlCode"`
+	Question string `json:"question"`
+	Subject  string `json:"subject"`
+	ExamName string `json:"examName"`
+	ExamSlug string `json:"examSlug"`
+	Year     string `json:"year"`
+}
+
 type Paper struct {
 	Slug            string   `json:"slug"`
 	ExamSlug        string   `json:"examSlug"`
@@ -90,6 +102,9 @@ type MockItem struct {
 	IsFree          bool     `json:"isFree"`
 	Subjects        []string `json:"subjects"`
 	NegativeMarking float64  `json:"negativeMarking"`
+	// Marks are not derivable from the question count: JKSSB SI (Telecom) is
+	// 100 questions for 200 marks, while most papers are 1 mark each.
+	MaxMarks        int      `json:"maxMarks"`
 }
 
 // ExamCutoffSet groups all cutoff rows for one (exam, stage, year) combination.

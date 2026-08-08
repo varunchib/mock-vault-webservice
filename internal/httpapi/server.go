@@ -317,6 +317,13 @@ func (s *Server) registerRoutes() {
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "question:" + r.PathValue("slug")
 		}, s.handleGetQuestion)))
+	// Related questions change only when content is added, so they cache far
+	// longer than the question itself — the SSR worker fetches this on every
+	// crawl of every question page.
+	s.mux.Handle("GET /api/v1/questions/{slug}/related", s.withRateLimit("pub", 120, time.Minute,
+		s.cachedPublicKey(6*time.Hour, func(r *http.Request) string {
+			return "question:related:" + r.PathValue("slug")
+		}, s.handleGetRelatedQuestions)))
 	s.mux.Handle("GET /api/v1/papers", s.withRateLimit("catalog", 60, time.Minute,
 		s.cachedPublic("papers:all", 5*time.Minute, s.handleListPapers)))
 	s.mux.Handle("GET /api/v1/papers/{slug}", s.withRateLimit("pub", 120, time.Minute,
@@ -350,6 +357,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/activity/attempt/start", s.withAuth(http.HandlerFunc(s.handleStartLiveAttempt), false))
 	s.mux.Handle("PUT /api/v1/activity/attempt/sync", s.withAuth(http.HandlerFunc(s.handleSyncLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/activity/attempt/active", s.withAuth(http.HandlerFunc(s.handleGetActiveLiveAttempts), false))
+	s.mux.Handle("GET /api/v1/activity/attempt/answers", s.withAuth(http.HandlerFunc(s.handleAttemptAnswers), false))
 	s.mux.Handle("POST /api/v1/activity/attempt/submit", s.withAuth(http.HandlerFunc(s.handleSubmitLiveAttempt), false))
 	s.mux.Handle("GET /api/v1/analytics/leaderboard", s.withAuth(http.HandlerFunc(s.handleExamLeaderboard), false))
 	s.mux.Handle("POST /api/v1/activity/visit", s.withAuth(http.HandlerFunc(s.handleRecordVisit), false))
@@ -374,6 +382,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("PATCH /api/v1/admin/users/{id}/status", s.withAuth(http.HandlerFunc(s.handleAdminUpdateUserStatus), true))
 	s.mux.Handle("GET /api/v1/admin/users/{id}/detail", s.withAuth(http.HandlerFunc(s.handleAdminUserDetail), true))
 	s.mux.Handle("GET /api/v1/admin/users/{id}/analytics", s.withAuth(http.HandlerFunc(s.handleAdminUserAnalytics), true))
+	s.mux.Handle("GET /api/v1/admin/users/{id}/attempt-answers", s.withAuth(http.HandlerFunc(s.handleAdminAttemptAnswers), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
 	s.mux.Handle("GET /api/v1/admin/active-users", s.withAuth(http.HandlerFunc(s.handleAdminActiveUsers), true))
 	s.mux.Handle("GET /api/v1/admin/audit", s.withAuth(http.HandlerFunc(s.handleListAudit), true))
@@ -717,6 +726,10 @@ func (s *Server) handleListExamQuestions(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleGetQuestion(w http.ResponseWriter, r *http.Request) (any, error) {
 	return s.repo.GetQuestionBySlug(r.Context(), r.PathValue("slug"))
+}
+
+func (s *Server) handleGetRelatedQuestions(w http.ResponseWriter, r *http.Request) (any, error) {
+	return s.repo.ListRelatedQuestions(r.Context(), r.PathValue("slug"), 6)
 }
 
 func (s *Server) handleListPapers(w http.ResponseWriter, r *http.Request) (any, error) {
@@ -1933,6 +1946,49 @@ func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleAdminAttemptAnswers is the admin view of the same sheet: it takes the
+// user whose attempt is being inspected. Kept as a separate, admin-only route
+// rather than a userId parameter on the public one, so no ordinary caller can
+// ever read another person's answers by adding a query string.
+func (s *Server) handleAdminAttemptAnswers(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.PathValue("id"))
+	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
+	if userID == "" || slug == "" {
+		s.respondError(w, http.StatusBadRequest, "user id and slug are required")
+		return
+	}
+	answers, err := s.repo.LatestAttemptAnswers(r.Context(), userID, slug)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"answers": answers})
+}
+
+// handleAttemptAnswers serves the responses from the caller's most recent
+// completed attempt, so review mode can show which options were chosen without
+// depending on the browser that happened to sit the paper.
+func (s *Server) handleAttemptAnswers(w http.ResponseWriter, r *http.Request) {
+	user, ok := userFromContext(r.Context())
+	if !ok {
+		s.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
+	if slug == "" {
+		s.respondError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+	answers, err := s.repo.LatestAttemptAnswers(r.Context(), user.ID, slug)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	// An empty map is a valid answer here — it means "no stored attempt" — so
+	// this is 200 with {} rather than a 404 the client would have to special-case.
+	s.respondJSON(w, http.StatusOK, map[string]any{"answers": answers})
 }
 
 func (s *Server) handleGetActiveLiveAttempts(w http.ResponseWriter, r *http.Request) {

@@ -294,9 +294,95 @@ func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string)
 	return question, nil
 }
 
+// ListRelatedQuestions returns questions topically close to the given one, for
+// the "Related questions" block. Question pages previously linked only up to
+// their exam and paper, which left ~3,000 of them as near-orphans in the link
+// graph; this connects them sideways.
+//
+// Relevance is ranked, not filtered, so the list is always full:
+//   1. number of shared meaningful tags
+//   2. same subject within the same exam
+//   3. same subject anywhere
+//   4. same exam
+//
+// "Meaningful" excludes the noise in the tag vocabulary — 1,501 distinct tags
+// mix real topics with years, board names, shift codes and question formats.
+// Ranking on the first tag alone returned "other Assertion & Reason questions"
+// spanning Geography, Polity and Science: related by shape, useless to a reader.
+//
+// At most four of the results may come from the source's own paper. Without
+// that cap every link stays inside one paper, which is fine for a reader but
+// pools link equity exactly where it is least needed. Only questions with a
+// real explanation are eligible — a related link must never point at a page too
+// thin to be worth crawling.
+func (r *PostgresRepository) ListRelatedQuestions(ctx context.Context, slug string, limit int) ([]models.RelatedQuestion, error) {
+	if limit <= 0 || limit > 24 {
+		limit = 6
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		WITH src AS (
+			SELECT slug, exam_slug, COALESCE(paper_slug, '') AS paper_slug,
+			       subject, exam_name, paper, tags
+			  FROM vaultcore.questions
+			 WHERE slug = $1 OR url_code = $1
+			 LIMIT 1
+		), cand AS (
+			SELECT q.url_code, q.question, q.subject,
+		               -- the compact name ("UPPCS") rather than the official one
+		               -- ("UPPCS Combined State / Upper Subordinate Services"),
+		               -- which wraps to two lines on a link card
+		               COALESCE(NULLIF(e.short_name, ''), q.exam_name) AS exam_name,
+		               q.exam_slug, q.year,
+			       (SELECT count(*) FROM jsonb_array_elements_text(q.tags) a
+			         WHERE a IN (SELECT b FROM jsonb_array_elements_text(src.tags) b)
+			           AND a !~ '^[0-9]{4}$'
+			           AND a NOT IN (src.subject, src.exam_name, src.paper)
+			           AND a NOT IN ('Assertion & Reason','Match the Following','Chronology',
+			                         'Statement Based','Memory Based','mock','Prelims','Mains')
+			       ) AS shared,
+			       (q.subject = src.subject) AS same_subject,
+			       (q.exam_slug = src.exam_slug) AS same_exam,
+			       (COALESCE(q.paper_slug, '') = src.paper_slug) AS same_paper
+			  FROM vaultcore.questions q
+			  CROSS JOIN src
+			  LEFT JOIN vaultcore.exams e ON e.slug = q.exam_slug
+			 WHERE q.slug <> src.slug
+			   AND q.url_code IS NOT NULL
+			   AND length(trim(q.explanation)) >= 100
+		), ranked AS (
+			SELECT *, row_number() OVER (
+			         PARTITION BY same_paper
+			         ORDER BY shared DESC, (same_subject AND same_exam) DESC,
+			                  same_subject DESC, same_exam DESC, url_code
+			       ) AS rn
+			  FROM cand
+		)
+		SELECT url_code, question, subject, exam_name, exam_slug, year
+		  FROM ranked
+		 WHERE NOT (same_paper AND rn > 4)
+		 ORDER BY shared DESC, (same_subject AND same_exam) DESC,
+		          same_subject DESC, same_exam DESC, url_code
+		 LIMIT $2
+	`, slug, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list related questions: %w", err)
+	}
+	defer rows.Close()
+
+	related := make([]models.RelatedQuestion, 0, limit)
+	for rows.Next() {
+		var q models.RelatedQuestion
+		if err := rows.Scan(&q.URLCode, &q.Question, &q.Subject, &q.ExamName, &q.ExamSlug, &q.Year); err != nil {
+			return nil, fmt.Errorf("scan related question: %w", err)
+		}
+		related = append(related, q)
+	}
+	return related, rows.Err()
+}
+
 func (r *PostgresRepository) ListMocks(ctx context.Context) ([]models.MockItem, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking
+		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking, COALESCE(max_marks, questions)
 		FROM vaultcore.mocks
 		ORDER BY exam_name, title
 	`)
@@ -318,7 +404,7 @@ func (r *PostgresRepository) ListMocks(ctx context.Context) ([]models.MockItem, 
 
 func (r *PostgresRepository) GetMockBySlug(ctx context.Context, slug string) (models.MockItem, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking
+		SELECT slug, exam_slug, exam_name, title, description, questions, duration_minutes, difficulty, is_free, subjects, negative_marking, COALESCE(max_marks, questions)
 		FROM vaultcore.mocks
 		WHERE slug = $1
 	`, slug)
@@ -1005,6 +1091,7 @@ func scanMock(row rowScanner) (models.MockItem, error) {
 		&mock.IsFree,
 		&subjectsRaw,
 		&mock.NegativeMarking,
+		&mock.MaxMarks,
 	); err != nil {
 		return models.MockItem{}, err
 	}
@@ -1232,6 +1319,37 @@ func (r *PostgresRepository) ListUserRecentAttempts(ctx context.Context, userID 
 	return attempts, rows.Err()
 }
 
+// LatestAttemptAnswers returns the responses a user gave on their most recent
+// completed attempt at a paper or mock. Review mode previously read these from
+// the browser's localStorage, so reopening a solved paper on any other device —
+// or from the admin panel — showed an empty answer sheet with every question
+// looking skipped.
+func (r *PostgresRepository) LatestAttemptAnswers(ctx context.Context, userID, slug string) (map[string]string, error) {
+	var raw []byte
+	err := r.db.QueryRowContext(ctx, `
+		SELECT answers
+		  FROM vaultcore.user_attempts
+		 WHERE user_id = $1
+		   AND (paper_slug = $2 OR mock_slug = $2)
+		   AND answers <> '{}'::jsonb
+		 ORDER BY completed_at DESC
+		 LIMIT 1
+	`, userID, slug).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest attempt answers: %w", err)
+	}
+	answers := map[string]string{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &answers); err != nil {
+			return nil, fmt.Errorf("decode attempt answers: %w", err)
+		}
+	}
+	return answers, nil
+}
+
 func (r *PostgresRepository) UpdateAttemptResult(ctx context.Context, attemptID string, correct, wrong, skipped, timeTaken int, answers map[string]string) error {
 	answersJSON, err := json.Marshal(answers)
 	if err != nil {
@@ -1327,6 +1445,10 @@ type LeaderboardEntry struct {
 	UserID   string `json:"userId"`
 	Name     string `json:"name"`
 	ScorePct int    `json:"scorePct"`
+	// The raw numbers behind the ratio. A percentage alone hides how long the
+	// paper was — "4%" reads very differently from "4/100".
+	Correct  int    `json:"correct"`
+	Total    int    `json:"total"`
 	IsMe     bool   `json:"isMe"`
 }
 
@@ -1334,19 +1456,30 @@ type LeaderboardEntry struct {
 // ratio). It contains no per-user data, so the result is safe to cache and share
 // across all viewers.
 func (r *PostgresRepository) GetExamLeaderboardTop(ctx context.Context, examSlug string) ([]LeaderboardEntry, error) {
+	// MAX(ratio) alone cannot carry the correct/total pair that produced it, so
+	// the best attempt per user is picked as a whole row first.
 	rows, err := r.db.QueryContext(ctx, `
-		WITH best AS (
+		WITH ranked AS (
 			SELECT ua.user_id,
 			       u.name,
-			       MAX(ua.correct_answers::float / NULLIF(ua.total_questions,0)) AS ratio
+			       ua.correct_answers,
+			       ua.total_questions,
+			       ua.correct_answers::float / NULLIF(ua.total_questions,0) AS ratio,
+			       ROW_NUMBER() OVER (
+			         PARTITION BY ua.user_id
+			         ORDER BY ua.correct_answers::float / NULLIF(ua.total_questions,0) DESC,
+			                  ua.completed_at DESC
+			       ) AS rn
 			FROM vaultcore.user_attempts ua
 			JOIN vaultcore.users u ON u.id = ua.user_id
 			WHERE ua.exam_slug = $1
 			  AND ua.total_questions > 0
 			  AND ua.correct_answers > 0
-			GROUP BY ua.user_id, u.name
+		), best AS (
+			SELECT * FROM ranked WHERE rn = 1
 		)
 		SELECT user_id, name, ROUND(ratio * 100)::int AS score_pct,
+		       correct_answers, total_questions,
 		       DENSE_RANK() OVER (ORDER BY ratio DESC) AS rnk
 		FROM best
 		ORDER BY rnk, name
@@ -1360,7 +1493,7 @@ func (r *PostgresRepository) GetExamLeaderboardTop(ctx context.Context, examSlug
 	var entries []LeaderboardEntry
 	for rows.Next() {
 		var e LeaderboardEntry
-		if err := rows.Scan(&e.UserID, &e.Name, &e.ScorePct, &e.Rank); err != nil {
+		if err := rows.Scan(&e.UserID, &e.Name, &e.ScorePct, &e.Correct, &e.Total, &e.Rank); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
