@@ -382,6 +382,7 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("PATCH /api/v1/admin/users/{id}/status", s.withAuth(http.HandlerFunc(s.handleAdminUpdateUserStatus), true))
 	s.mux.Handle("GET /api/v1/admin/users/{id}/detail", s.withAuth(http.HandlerFunc(s.handleAdminUserDetail), true))
 	s.mux.Handle("GET /api/v1/admin/users/{id}/analytics", s.withAuth(http.HandlerFunc(s.handleAdminUserAnalytics), true))
+	s.mux.Handle("GET /api/v1/admin/users/{id}/attempt-answers", s.withAuth(http.HandlerFunc(s.handleAdminAttemptAnswers), true))
 	s.mux.Handle("GET /api/v1/admin/active-count", s.withAuth(http.HandlerFunc(s.handleAdminActiveCount), true))
 	s.mux.Handle("GET /api/v1/admin/active-users", s.withAuth(http.HandlerFunc(s.handleAdminActiveUsers), true))
 	s.mux.Handle("GET /api/v1/admin/audit", s.withAuth(http.HandlerFunc(s.handleListAudit), true))
@@ -1945,6 +1946,25 @@ func (s *Server) handleSyncLiveAttempt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleAdminAttemptAnswers is the admin view of the same sheet: it takes the
+// user whose attempt is being inspected. Kept as a separate, admin-only route
+// rather than a userId parameter on the public one, so no ordinary caller can
+// ever read another person's answers by adding a query string.
+func (s *Server) handleAdminAttemptAnswers(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.PathValue("id"))
+	slug := strings.TrimSpace(r.URL.Query().Get("slug"))
+	if userID == "" || slug == "" {
+		s.respondError(w, http.StatusBadRequest, "user id and slug are required")
+		return
+	}
+	answers, err := s.repo.LatestAttemptAnswers(r.Context(), userID, slug)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"answers": answers})
 }
 
 // handleAttemptAnswers serves the responses from the caller's most recent
