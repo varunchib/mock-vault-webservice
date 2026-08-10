@@ -511,6 +511,7 @@ var paperCanonicalSlug = map[string]string{
 	"jkssb-lab-attendant-2026-may-10":   "jkssb-laboratory-attendant-question-paper-2026",
 	"jkssb-wildlife-guard-2026-may-10":  "jkssb-wildlife-guard-question-paper-2026",
 	"jkssb-patwari-2024-sep1-set-a":     "jkssb-patwari-question-paper-2024",
+	"hp-patwari-2019":                   "hp-patwari-question-paper-2019",
 	"jkssb-veterinary-pharmacist-2025":  "jkssb-veterinary-pharmacist-question-paper-2025",
 	"jkssb-finance-accounts-2024-paper": "jkssb-finance-accounts-assistant-question-paper-2024",
 }
