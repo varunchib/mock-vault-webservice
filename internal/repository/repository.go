@@ -1350,13 +1350,30 @@ func (r *PostgresRepository) LatestAttemptAnswers(ctx context.Context, userID, s
 	return answers, nil
 }
 
-func (r *PostgresRepository) UpdateAttemptResult(ctx context.Context, attemptID string, correct, wrong, skipped, timeTaken int, answers map[string]string) error {
+// UpdateAttemptResult writes the scored result of an attempt.
+//
+// The counts must always be computed server-side from the stored answer keys —
+// they are never taken from the client, or any signed-in user could post a
+// perfect score and top the leaderboard.
+//
+// answers is persisted exactly as submitted: it is the record of which option
+// the candidate marked for each question, and review mode reads it back to
+// paint the chosen option green or red. Scoring never rewrites it.
+//
+// The user_id predicate is an ownership check — an attempt may only be written
+// by the user it belongs to. Returns ErrNotFound when the attempt does not
+// exist or is somebody else's.
+func (r *PostgresRepository) UpdateAttemptResult(ctx context.Context, attemptID, userID string, correct, wrong, skipped, timeTaken int, answers map[string]string) error {
+	if answers == nil {
+		// A nil map marshals to JSON `null`, which review mode cannot read back.
+		answers = map[string]string{}
+	}
 	answersJSON, err := json.Marshal(answers)
 	if err != nil {
 		return fmt.Errorf("marshal answers: %w", err)
 	}
 	total := correct + wrong + skipped
-	_, err = r.db.ExecContext(ctx, `
+	result, err := r.db.ExecContext(ctx, `
 		UPDATE vaultcore.user_attempts
 		SET score              = $1,
 		    total_questions    = $2,
@@ -1366,10 +1383,13 @@ func (r *PostgresRepository) UpdateAttemptResult(ctx context.Context, attemptID 
 		    time_taken_seconds = $6,
 		    answers            = $7,
 		    completed_at       = CURRENT_TIMESTAMP
-		WHERE id = $8
-	`, correct, total, correct, wrong, skipped, timeTaken, string(answersJSON), attemptID)
+		WHERE id = $8 AND user_id = $9
+	`, correct, total, correct, wrong, skipped, timeTaken, string(answersJSON), attemptID, userID)
 	if err != nil {
 		return fmt.Errorf("update attempt result: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

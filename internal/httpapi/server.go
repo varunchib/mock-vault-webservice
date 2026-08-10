@@ -209,7 +209,14 @@ func (s *Server) limitRequestBody(next http.Handler) http.Handler {
 	})
 }
 
-// realIP extracts the leftmost non-proxy IP from forwarding headers.
+// realIP extracts the leftmost IP from the forwarding headers — the visitor as
+// *claimed*. The SSR Worker forwards the real visitor address there on its
+// origin subrequests (see the X-Forwarded-For header it sets in worker.ts),
+// which is what keeps every crawler hit from sharing one rate-limit bucket.
+//
+// That leftmost value is caller-supplied and therefore forgeable. Use it for
+// per-visitor accounting where a spoof only cheats the spoofer (public read
+// caches, catalogue limits); use trustedIP for anything security-bearing.
 func realIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.Index(xff, ","); i != -1 {
@@ -219,6 +226,39 @@ func realIP(r *http.Request) string {
 	}
 	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
 		return strings.TrimSpace(xri)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// trustedIP returns the peer address as observed by our own edge, ignoring
+// whatever the caller put in X-Forwarded-For.
+//
+// nginx sets `X-Real-IP $remote_addr` with proxy_set_header, which *replaces*
+// any client-supplied value, and $remote_addr has already been rewritten to the
+// true client by set_real_ip_from/CF-Connecting-IP. That makes X-Real-IP the
+// authoritative source. X-Forwarded-For is only consulted as a fallback, and
+// then from the *last* entry, since nginx appends $remote_addr to whatever
+// arrived — so the tail is the hop our proxy vouches for, and any addresses a
+// caller injected sit harmlessly in front of it.
+//
+// Everything that carries a security consequence — brute-force buckets, the
+// admin audit trail, stored session records — must use this rather than realIP.
+func trustedIP(r *http.Request) string {
+	if xri := strings.TrimSpace(r.Header.Get("X-Real-Ip")); xri != "" {
+		return xri
+	}
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if i := strings.LastIndex(xff, ","); i != -1 {
+			if last := strings.TrimSpace(xff[i+1:]); last != "" {
+				return last
+			}
+		} else {
+			return xff
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -246,10 +286,18 @@ func (s *Server) checkRateLimit(ctx context.Context, key string, limit int, wind
 	return false, 0
 }
 
-// withRateLimit wraps a handler with per-IP fixed-window rate limiting.
+// withRateLimit wraps a handler with per-visitor fixed-window rate limiting,
+// keyed on the forwarded (spoofable) address so SSR traffic buckets per crawler.
 func (s *Server) withRateLimit(category string, limit int, window time.Duration, next http.Handler) http.Handler {
+	return s.withRateLimitBy(category, limit, window, realIP, next)
+}
+
+// withRateLimitBy is withRateLimit with an explicit address source. Endpoints
+// worth attacking (login, refresh) pass trustedIP so the bucket cannot be
+// sidestepped by inventing an X-Forwarded-For value per request.
+func (s *Server) withRateLimitBy(category string, limit int, window time.Duration, ipOf func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := realIP(r)
+		ip := ipOf(r)
 		key := fmt.Sprintf("rl:%s:%s", category, ip)
 		allowed, remaining := s.checkRateLimit(r.Context(), key, limit, window)
 		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limit))
@@ -292,8 +340,12 @@ func (s *Server) registerRoutes() {
 	// window; login stays tight enough to blunt credential stuffing. Both are
 	// per-IP, and Indian mobile carriers CGNAT many users onto one IP — another
 	// reason 15/min combined was far too low.
-	s.mux.Handle("POST /api/v1/auth/google", s.withRateLimit("auth-login", 30, time.Minute, http.HandlerFunc(s.handleGoogleLogin)))
-	s.mux.Handle("POST /api/v1/auth/refresh", s.withRateLimit("auth-refresh", 120, time.Minute, http.HandlerFunc(s.handleRefresh)))
+	//
+	// Both buckets key on trustedIP, not the forwarded header: a caller who can
+	// pick their own X-Forwarded-For gets a fresh quota on every request, which
+	// would leave these two limits decorative.
+	s.mux.Handle("POST /api/v1/auth/google", s.withRateLimitBy("auth-login", 30, time.Minute, trustedIP, http.HandlerFunc(s.handleGoogleLogin)))
+	s.mux.Handle("POST /api/v1/auth/refresh", s.withRateLimitBy("auth-refresh", 120, time.Minute, trustedIP, http.HandlerFunc(s.handleRefresh)))
 	s.mux.Handle("GET /api/v1/auth/me", s.withAuth(http.HandlerFunc(s.handleMe), false))
 	s.mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.handleLogout), false))
 
@@ -1589,7 +1641,9 @@ func (s *Server) isAllowedOrigin(origin string) bool {
 }
 
 func sessionMetadataFromRequest(r *http.Request) auth.SessionMetadata {
-	ip := realIP(r)
+	// Sessions are security records — "which address signed in" has to be the
+	// address we observed, not one the caller supplied.
+	ip := trustedIP(r)
 	city := strings.TrimSpace(r.Header.Get("CF-IPCity"))
 	if city == "" || city == "XX" || strings.EqualFold(city, "Unknown") {
 		city = cityFromIP(r.Context(), ip)
@@ -1662,7 +1716,9 @@ func (s *Server) audit(r *http.Request, action, target string, details map[strin
 	if !ok {
 		return
 	}
-	actorID, actorEmail, ip := user.ID, user.Email, realIP(r)
+	// trustedIP: an audit trail a caller can write their own addresses into is
+	// worse than none, because it reads as evidence.
+	actorID, actorEmail, ip := user.ID, user.Email, trustedIP(r)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1871,9 +1927,19 @@ func (s *Server) handleStartLiveAttempt(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// New attempt: create DB record
+	// New attempt: create DB record. The slug has to be routed to the column it
+	// actually belongs to — see attemptTargetKind.
 	id := newAttemptID()
-	if err := s.repo.RecordAttempt(r.Context(), id, user.ID, req.ExamSlug, "", req.PaperSlug); err != nil {
+	mockSlug, paperSlug := "", req.PaperSlug
+	isMock, err := s.attemptTargetKind(r.Context(), req.PaperSlug)
+	if err != nil {
+		s.respondRepositoryError(w, err)
+		return
+	}
+	if isMock {
+		mockSlug, paperSlug = req.PaperSlug, ""
+	}
+	if err := s.repo.RecordAttempt(r.Context(), id, user.ID, req.ExamSlug, mockSlug, paperSlug); err != nil {
 		s.respondRepositoryError(w, err)
 		return
 	}
@@ -2063,12 +2129,14 @@ func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// correct/wrong/skipped are deliberately NOT decoded from the request. The
+	// client still sends them (older builds do, and it drives its own result
+	// screen), but the stored score is recomputed here from the submitted answer
+	// sheet against the real answer keys — otherwise any signed-in user could
+	// post correct:200 and take the top of the leaderboard.
 	var req struct {
 		AttemptID        string            `json:"attemptId"`
 		PaperSlug        string            `json:"paperSlug"`
-		Correct          int               `json:"correct"`
-		Wrong            int               `json:"wrong"`
-		Skipped          int               `json:"skipped"`
 		TimeTakenSeconds int               `json:"timeTakenSeconds"`
 		Answers          map[string]string `json:"answers"`
 	}
@@ -2076,9 +2144,29 @@ func (s *Server) handleSubmitLiveAttempt(w http.ResponseWriter, r *http.Request)
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	req.PaperSlug = strings.TrimSpace(req.PaperSlug)
+	if req.Answers == nil {
+		req.Answers = map[string]string{}
+	}
 
 	if req.AttemptID != "" {
-		if err := s.repo.UpdateAttemptResult(r.Context(), req.AttemptID, req.Correct, req.Wrong, req.Skipped, req.TimeTakenSeconds, req.Answers); err != nil {
+		questions, err := s.questionsForAttempt(r.Context(), req.PaperSlug)
+		if err != nil {
+			log.Printf("submit attempt: load questions for %s: %v", req.PaperSlug, err)
+			s.respondError(w, http.StatusInternalServerError, "Failed to save attempt result")
+			return
+		}
+		correct, wrong, skipped := scoreAttempt(questions, req.Answers)
+		// req.Answers goes to the database exactly as submitted — it is the
+		// record of what the candidate marked, which review mode reads back to
+		// colour each option. Only the counts are server-derived.
+		if err := s.repo.UpdateAttemptResult(r.Context(), req.AttemptID, user.ID,
+			correct, wrong, skipped, clampTimeTaken(req.TimeTakenSeconds), req.Answers); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				// The attempt does not exist, or belongs to another user.
+				s.respondError(w, http.StatusNotFound, "Attempt not found")
+				return
+			}
 			log.Printf("submit attempt: save result for %s: %v", req.AttemptID, err)
 			s.respondError(w, http.StatusInternalServerError, "Failed to save attempt result")
 			return
@@ -2151,27 +2239,106 @@ func (s *Server) expireOverdueLiveAttempts() {
 }
 
 func (s *Server) autoSubmitLiveAttempt(ctx context.Context, userID, paperSlug string, state *liveAttemptState) {
-	questions, err := s.repo.ListQuestionsByPaper(ctx, state.PaperSlug)
+	questions, err := s.questionsForAttempt(ctx, state.PaperSlug)
 	if err != nil || len(questions) == 0 {
 		s.clearLiveAttempt(ctx, userID, paperSlug)
 		return
 	}
-	correct, wrong, skipped := 0, 0, 0
+	correct, wrong, skipped := scoreAttempt(questions, state.Answers)
+	timeTaken := clampTimeTaken(int(time.Since(state.StartedAt).Seconds()))
+	if state.AttemptID != "" {
+		_ = s.repo.UpdateAttemptResult(ctx, state.AttemptID, userID, correct, wrong, skipped, timeTaken, state.Answers)
+	}
+	s.clearLiveAttempt(ctx, userID, paperSlug)
+}
+
+// maxAttemptSeconds bounds the client-reported duration: longer than any real
+// paper, short enough that a bogus value cannot poison time-taken averages.
+const maxAttemptSeconds = 24 * 60 * 60
+
+func clampTimeTaken(seconds int) int {
+	switch {
+	case seconds < 0:
+		return 0
+	case seconds > maxAttemptSeconds:
+		return maxAttemptSeconds
+	default:
+		return seconds
+	}
+}
+
+// scoreAttempt is the single source of truth for turning an answer sheet into
+// correct/wrong/skipped counts. Both the candidate's own submit and the expiry
+// worker's auto-submit go through it, so one paper can never score two ways
+// depending on which path happened to record it.
+//
+// answers maps question slug → the option key the candidate marked, and is only
+// ever read here — the sheet itself is stored verbatim so review mode can show
+// each marked option in green or red.
+//
+// Questions whose answer key is "Deleted" (dropped by the board after the paper
+// was held) are excluded from every count. That mirrors computeResults() in
+// src/pages/PaperAttemptPage.tsx, so the totals stored here are exactly the ones
+// the candidate saw on screen.
+func scoreAttempt(questions []models.Question, answers map[string]string) (correct, wrong, skipped int) {
 	for _, q := range questions {
-		ans := state.Answers[q.Slug]
-		if ans == "" {
+		if q.AnswerKey == "Deleted" {
+			continue
+		}
+		switch chosen := answers[q.Slug]; {
+		case chosen == "":
 			skipped++
-		} else if ans == q.AnswerKey {
+		case chosen == q.AnswerKey:
 			correct++
-		} else {
+		default:
 			wrong++
 		}
 	}
-	timeTaken := int(time.Since(state.StartedAt).Seconds())
-	if state.AttemptID != "" {
-		_ = s.repo.UpdateAttemptResult(ctx, state.AttemptID, correct, wrong, skipped, timeTaken, state.Answers)
+	return correct, wrong, skipped
+}
+
+// attemptTargetKind reports whether an attempt slug is a mock test rather than a
+// PYQ paper.
+//
+// The attempt UI sends both through one paperSlug field, but user_attempts
+// stores them in separate columns that each carry their own foreign key. Writing
+// a mock's slug into paper_slug violates user_attempts_paper_slug_fkey, so the
+// INSERT fails and the attempt is never recorded — no history, no leaderboard
+// entry, and nothing for review mode to read back.
+//
+// Returns ErrNotFound when the slug is neither, so a bogus slug 404s instead of
+// silently opening an attempt against nothing.
+func (s *Server) attemptTargetKind(ctx context.Context, slug string) (bool, error) {
+	_, err := s.repo.GetPaperBySlug(ctx, slug)
+	switch {
+	case err == nil:
+		return false, nil
+	case !errors.Is(err, repository.ErrNotFound):
+		return false, err
 	}
-	s.clearLiveAttempt(ctx, userID, paperSlug)
+
+	_, err = s.repo.GetMockBySlug(ctx, slug)
+	switch {
+	case err == nil:
+		return true, nil
+	case !errors.Is(err, repository.ErrNotFound):
+		return false, err
+	}
+	return false, repository.ErrNotFound
+}
+
+// questionsForAttempt resolves the question set behind an attempt slug. The
+// attempt UI drives both PYQ papers and mock tests through the same paperSlug
+// field, so a slug matching no paper is retried as a mock.
+func (s *Server) questionsForAttempt(ctx context.Context, slug string) ([]models.Question, error) {
+	questions, err := s.repo.ListQuestionsByPaper(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	if len(questions) > 0 {
+		return questions, nil
+	}
+	return s.repo.ListQuestionsByMock(ctx, slug)
 }
 
 // ── Analytics leaderboard ──────────────────────────────────────────────────
