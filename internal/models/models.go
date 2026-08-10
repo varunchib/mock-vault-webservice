@@ -35,20 +35,20 @@ type QuestionOption struct {
 	Text string `json:"text"`
 }
 
-// QuestionTranslation carries a localised rendering of a question. Options use
-// the same key/text shape as Question.Options, because the answer key is matched
-// by letter and the UI reads opt.key.
+// QuestionTranslation carries a localised rendering of a question. Options are
+// the translated option *texts* only: the client merges them positionally with
+// Question.Options, which is where the keys come from (see getLocalizedQuestion
+// in the web app). Storing anything else here white-screens the paper page.
 type QuestionTranslation struct {
-	Passage  string           `json:"passage,omitempty"`
-	Question string           `json:"question"`
-	Options  []QuestionOption `json:"options"`
+	Passage  string   `json:"passage,omitempty"`
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
 }
 
-// UnmarshalJSON tolerates both shapes the translations column has accumulated:
-// older imports stored options as bare strings, newer ones as {key, text}
-// objects. A bare string gets its key from its position, which matches how the
-// options were always displayed. Without this, whichever shape the struct did
-// not expect failed to scan and took the entire paper endpoint down with a 500.
+// UnmarshalJSON keeps the []string contract above while tolerating rows written
+// as [{key, text}] objects, which one import produced. Such a row decodes to its
+// texts in order rather than failing the scan, because a scan error takes the
+// whole /papers/{slug}/questions endpoint down with a 500.
 func (t *QuestionTranslation) UnmarshalJSON(data []byte) error {
 	type alias QuestionTranslation // sheds this method, so no recursion
 	aux := struct {
@@ -63,18 +63,18 @@ func (t *QuestionTranslation) UnmarshalJSON(data []byte) error {
 	if len(aux.Options) == 0 || string(aux.Options) == "null" {
 		return nil
 	}
-	var objects []QuestionOption
-	if err := json.Unmarshal(aux.Options, &objects); err == nil {
-		t.Options = objects
+	var texts []string
+	if err := json.Unmarshal(aux.Options, &texts); err == nil {
+		t.Options = texts
 		return nil
 	}
-	var texts []string
-	if err := json.Unmarshal(aux.Options, &texts); err != nil {
+	var objects []QuestionOption
+	if err := json.Unmarshal(aux.Options, &objects); err != nil {
 		return err
 	}
-	t.Options = make([]QuestionOption, 0, len(texts))
-	for i, text := range texts {
-		t.Options = append(t.Options, QuestionOption{Key: string(rune('A' + i)), Text: text})
+	t.Options = make([]string, 0, len(objects))
+	for _, o := range objects {
+		t.Options = append(t.Options, o.Text)
 	}
 	return nil
 }
