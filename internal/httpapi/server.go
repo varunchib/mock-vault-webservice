@@ -585,7 +585,11 @@ func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
 
 var (
 	kwMath  = regexp.MustCompile(`\$[^$]*\$`)
-	kwAlnum = regexp.MustCompile(`[^a-z0-9]+`)
+	// Devanagari (U+0900-U+097F) is kept alongside a-z0-9 so Hindi questions get
+	// real keywords in their URL instead of collapsing to the bare id. Google
+	// accepts UTF-8 paths and displays them decoded, so a Hindi paper ranks on
+	// the words candidates actually search.
+	kwAlnum = regexp.MustCompile(`[^a-z0-9\x{0900}-\x{097F}]+`)
 	kwMarks = strings.NewReplacer("*", " ", "_", " ", "`", " ", "#", " ", ">", " ", "~", " ", "|", " ")
 )
 
@@ -613,8 +617,13 @@ func keywordify(text string) string {
 		}
 	}
 	s = strings.Join(kept, "-")
-	if len(s) > 80 {
-		s = s[:80]
+	// Cap by RUNES, not bytes. A Devanagari character is three bytes, so slicing
+	// on a byte boundary would cut one in half and emit invalid UTF-8 -- and the
+	// TypeScript side counts code points, so a byte cap would also desync the two
+	// implementations. For pure-ASCII text this is identical to the old byte cap,
+	// which is why existing English URLs are unchanged.
+	if r := []rune(s); len(r) > 80 {
+		s = string(r[:80])
 	}
 	return strings.Trim(s, "-")
 }

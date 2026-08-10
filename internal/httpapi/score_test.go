@@ -3,7 +3,9 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"mock-vault-webservice/internal/models"
 )
@@ -161,6 +163,62 @@ func TestTrustedIPIgnoresSpoofedForwardedFor(t *testing.T) {
 				t.Errorf("trustedIP() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// keywordify exists twice: here and in mock-vault-webapp/src/lib/questionUrl.ts.
+// Go builds the sitemap URL, TypeScript builds the canonical <link>, so any
+// divergence makes the sitemap advertise a URL the page disowns -- Search
+// Console reports that as "Page with redirect".
+//
+// These cases are duplicated verbatim in
+// mock-vault-webapp/scripts/check-keywordify.mjs. Change one side and its own
+// check fails.
+func TestKeywordify(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// English is untouched by the Devanagari change.
+		{"He deals ______ stationery.", "he-deals-stationery"},
+		{"REGRET:", "regret"},
+		{"Choose the correct synonym of ‘audacity’:", "choose-the-correct-synonym-of-audacity"},
+		// Hindi now yields real keywords instead of an empty slug.
+		{"‘कठोर’ के लिए समानार्थक शब्द है:", "कठोर-के-लिए-समानार्थक-शब्द-है"},
+		{"कम्प्यूटर का दिमाग किसे कहते हैं?", "कम्प्यूटर-का-दिमाग-किसे-कहते-हैं"},
+		{"हिमाचल प्रदेश उच्च न्यायालय की स्थापना कब हुई?", "हिमाचल-प्रदेश-उच्च-न्यायालय-की-स्थापना-कब-हुई"},
+		// Mixed script. The 12-word cap lands on ब्याज.
+		{"1000 रूपये पर 10% वार्षिक दर से 2 साल का चक्रवृद्धि ब्याज (Compound Interest) है:",
+			"1000-रूपये-पर-10-वार्षिक-दर-से-2-साल-का-चक्रवृद्धि-ब्याज"},
+		// Structural rules.
+		{"a & b", "a-and-b"},
+		{"$x^2 + y$ only", "only"},
+		{"", ""},
+		{"२०१९ में", "२०१९-में"},
+	}
+	for _, tc := range cases {
+		if got := keywordify(tc.in); got != tc.want {
+			t.Errorf("keywordify(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The length cap must count runes, not bytes: a Devanagari character is three
+// bytes, so a byte cap would both split a character and desync from the
+// TypeScript side, which counts code points.
+func TestKeywordifyCapsAreRuneSafe(t *testing.T) {
+	if n := len(strings.Split(keywordify(strings.TrimSpace(strings.Repeat("क ", 40))), "-")); n > 12 {
+		t.Errorf("word cap: got %d words, want <= 12", n)
+	}
+	out := keywordify(strings.Repeat("क", 200))
+	if n := utf8.RuneCountInString(out); n > 80 {
+		t.Errorf("length cap: got %d runes, want <= 80", n)
+	}
+	if !utf8.ValidString(out) {
+		t.Error("length cap split a multi-byte character: output is not valid UTF-8")
+	}
+}
+
+func TestQuestionURLPathFallsBackToBareID(t *testing.T) {
+	if got := questionURLPath("abc123", ""); got != "/question/abc123" {
+		t.Errorf("questionURLPath with no keywords = %q, want /question/abc123", got)
 	}
 }
 
