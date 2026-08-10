@@ -149,7 +149,11 @@ func (r *PostgresRepository) ListPapersByExam(ctx context.Context, examSlug stri
 		-- idx_papers_exam_slug and idx_exams_board_slug.
 		WHERE exam_slug = $1
 		   OR exam_slug IN (SELECT slug FROM vaultcore.exams WHERE board_slug = $1)
-		ORDER BY held_on DESC NULLS LAST, year DESC, title
+		-- shift precedes title so papers from one sitting stay in shift order.
+		-- Falling straight through to title made ordering depend on punctuation:
+		-- rows titled with an ASCII hyphen sorted above ones using an em dash,
+		-- which put 12 Sep Shift 3 above Shift 2.
+		ORDER BY held_on DESC NULLS LAST, year DESC, shift, title
 	`, examSlug)
 	if err != nil {
 		return nil, fmt.Errorf("list papers by exam: %w", err)
