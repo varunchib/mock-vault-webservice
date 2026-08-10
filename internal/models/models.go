@@ -35,14 +35,48 @@ type QuestionOption struct {
 	Text string `json:"text"`
 }
 
-// QuestionTranslation carries a localised rendering of a question. Options keep
-// the same key/text shape as Question.Options: the answer key is matched by
-// letter, so a translated option list has to carry its keys rather than relying
-// on position.
+// QuestionTranslation carries a localised rendering of a question. Options use
+// the same key/text shape as Question.Options, because the answer key is matched
+// by letter and the UI reads opt.key.
 type QuestionTranslation struct {
 	Passage  string           `json:"passage,omitempty"`
 	Question string           `json:"question"`
 	Options  []QuestionOption `json:"options"`
+}
+
+// UnmarshalJSON tolerates both shapes the translations column has accumulated:
+// older imports stored options as bare strings, newer ones as {key, text}
+// objects. A bare string gets its key from its position, which matches how the
+// options were always displayed. Without this, whichever shape the struct did
+// not expect failed to scan and took the entire paper endpoint down with a 500.
+func (t *QuestionTranslation) UnmarshalJSON(data []byte) error {
+	type alias QuestionTranslation // sheds this method, so no recursion
+	aux := struct {
+		Options json.RawMessage `json:"options"`
+		*alias
+	}{alias: (*alias)(t)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	t.Options = nil
+	if len(aux.Options) == 0 || string(aux.Options) == "null" {
+		return nil
+	}
+	var objects []QuestionOption
+	if err := json.Unmarshal(aux.Options, &objects); err == nil {
+		t.Options = objects
+		return nil
+	}
+	var texts []string
+	if err := json.Unmarshal(aux.Options, &texts); err != nil {
+		return err
+	}
+	t.Options = make([]QuestionOption, 0, len(texts))
+	for i, text := range texts {
+		t.Options = append(t.Options, QuestionOption{Key: string(rune('A' + i)), Text: text})
+	}
+	return nil
 }
 
 type Question struct {
