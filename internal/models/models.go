@@ -35,10 +35,14 @@ type QuestionOption struct {
 	Text string `json:"text"`
 }
 
+// QuestionTranslation carries a localised rendering of a question. Options keep
+// the same key/text shape as Question.Options: the answer key is matched by
+// letter, so a translated option list has to carry its keys rather than relying
+// on position.
 type QuestionTranslation struct {
-	Passage  string   `json:"passage,omitempty"`
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
+	Passage  string           `json:"passage,omitempty"`
+	Question string           `json:"question"`
+	Options  []QuestionOption `json:"options"`
 }
 
 type Question struct {
