@@ -89,6 +89,11 @@ type Question struct {
 	Paper        string                         `json:"paper"`
 	Subject      string                         `json:"subject"`
 	QuestionNo   string                         `json:"questionNo"`
+	// Passage holds the shared reading-comprehension text for a question that
+	// belongs to an RC or cloze set. It is stored apart from Question so the
+	// question itself is the question actually asked -- which is what becomes
+	// the page heading and the keywords in the URL. Empty for everything else.
+	Passage      string                         `json:"passage,omitempty"`
 	Question     string                         `json:"question"`
 	Options      []QuestionOption               `json:"options"`
 	AnswerKey    string                         `json:"answerKey"`

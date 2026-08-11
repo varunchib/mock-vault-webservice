@@ -190,7 +190,7 @@ func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (m
 
 func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		ORDER BY exam_name, year DESC,
 			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
@@ -214,7 +214,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 
 func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		-- Same rule as papers: a board aggregates its sub-exams' questions.
 		WHERE exam_slug = $1
@@ -241,7 +241,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 
 func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
 		ORDER BY
@@ -266,7 +266,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 
 func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
 		ORDER BY
@@ -291,7 +291,7 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 
 func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string) (models.Question, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE slug = $1 OR url_code = $1
 	`, slug)
@@ -1051,6 +1051,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 		&question.Paper,
 		&question.Subject,
 		&question.QuestionNo,
+		&question.Passage,
 		&question.Question,
 		&optionsRaw,
 		&question.AnswerKey,
