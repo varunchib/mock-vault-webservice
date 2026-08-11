@@ -86,17 +86,6 @@ ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS mock_slug TEXT;
 ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS translations JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
--- images and url_code have been live in production for some time but were never
--- added here, so a database built from this file alone came up missing them and
--- every question query failed on the unknown column.
-ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS images JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS url_code TEXT;
--- Shared reading-comprehension / cloze text. Kept out of `question` so that
--- `question` holds only what is asked: the page heading is taken from the last
--- line ending in "?", and the URL keywords from the first words of the text, so
--- a passage stored inside `question` gives every question in a set the same
--- heading and near-identical URLs.
-ALTER TABLE vaultcore.questions ADD COLUMN IF NOT EXISTS passage TEXT;
 
 DO $$
 BEGIN
