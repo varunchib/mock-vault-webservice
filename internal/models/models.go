@@ -22,11 +22,8 @@ type Exam struct {
 	// exposing it lets clients stop inferring the hierarchy from slug prefixes.
 	BoardSlug string `json:"boardSlug,omitempty"`
 	// ChildExamCount is how many exams name this one as their board_slug — i.e.
-	// how many sub-exams sit under it. 0 = a standalone exam. Exactly 1 = a "thin"
-	// board: its page aggregates a single sub-exam, so it is a near-duplicate of
-	// that sub-exam's page and must stay out of the index (Worker serves it
-	// noindex, sitemap skips it) until a second sub-exam is added and it becomes a
-	// genuine hub. >= 2 = an indexable board hub.
+	// how many sub-exams sit under it. It supports board-hub navigation; a board
+	// remains indexable even when it currently has only one child.
 	ChildExamCount int `json:"childExamCount"`
 }
 
@@ -89,6 +86,11 @@ type Question struct {
 	Paper        string                         `json:"paper"`
 	Subject      string                         `json:"subject"`
 	QuestionNo   string                         `json:"questionNo"`
+	// Passage holds the shared reading-comprehension text for a question that
+	// belongs to an RC or cloze set. It is stored apart from Question so the
+	// question itself is the question actually asked -- which is what becomes
+	// the page heading and the keywords in the URL. Empty for everything else.
+	Passage      string                         `json:"passage,omitempty"`
 	Question     string                         `json:"question"`
 	Options      []QuestionOption               `json:"options"`
 	AnswerKey    string                         `json:"answerKey"`

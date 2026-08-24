@@ -85,8 +85,7 @@ const examSelectSQL = `
 	  COALESCE(e.subjects, '[]'::jsonb),
 	  COALESCE(e.board_slug, ''),
 	  -- How many sub-exams sit under this one. Lets clients tell a standalone exam
-	  -- (0) from a thin board (1, a near-duplicate of its lone child → noindex)
-	  -- from a real hub (>= 2). Cheap: idx_exams_board_slug.
+	  -- from a board hub (>= 1). Cheap: idx_exams_board_slug.
 	  (SELECT count(*) FROM vaultcore.exams c WHERE c.board_slug = e.slug)
 	FROM vaultcore.exams e`
 
@@ -190,7 +189,7 @@ func (r *PostgresRepository) GetPaperBySlug(ctx context.Context, slug string) (m
 
 func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		ORDER BY exam_name, year DESC,
 			CASE WHEN question_no ~ '^[0-9]+$' THEN question_no::INTEGER END NULLS LAST,
@@ -214,7 +213,7 @@ func (r *PostgresRepository) ListQuestions(ctx context.Context) ([]models.Questi
 
 func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		-- Same rule as papers: a board aggregates its sub-exams' questions.
 		WHERE exam_slug = $1
@@ -241,7 +240,7 @@ func (r *PostgresRepository) ListQuestionsByExam(ctx context.Context, examSlug s
 
 func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE paper_slug = $1
 		ORDER BY
@@ -266,7 +265,7 @@ func (r *PostgresRepository) ListQuestionsByPaper(ctx context.Context, paperSlug
 
 func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug string) ([]models.Question, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE mock_slug = $1
 		ORDER BY
@@ -291,7 +290,7 @@ func (r *PostgresRepository) ListQuestionsByMock(ctx context.Context, mockSlug s
 
 func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string) (models.Question, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
+		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
 		WHERE slug = $1 OR url_code = $1
 	`, slug)
@@ -1051,6 +1050,7 @@ func scanQuestion(row rowScanner) (models.Question, error) {
 		&question.Paper,
 		&question.Subject,
 		&question.QuestionNo,
+		&question.Passage,
 		&question.Question,
 		&optionsRaw,
 		&question.AnswerKey,
@@ -1987,18 +1987,14 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 	rows, err := r.db.QueryContext(ctx, `
 		-- Exam hubs. Include an exam that has real content of its own OR rolled up
 		-- from its sub-exams (counted, so the drifting stored papers column can't
-		-- leak). Skip a THIN board — one with exactly ONE sub-exam — because its
-		-- page just aggregates that lone child and is a near-duplicate of it; it
-		-- stays out of the index until a 2nd sub-exam makes it a genuine hub. This
-		-- replaces the old hand-kept allowlist and is fully automatic: add a second
-		-- exam under a board and it starts appearing here on the next rebuild.
+		-- leak). A board remains an indexable navigational hub even with one child:
+		-- it is the canonical entry point for that board and its paper collection.
 		SELECT 'exam', e.slug, e.updated_at, ''::text AS title
 		FROM vaultcore.exams e
 		WHERE ((SELECT count(*) FROM vaultcore.papers p
 		          WHERE p.exam_slug = e.slug
 		             OR p.exam_slug IN (SELECT s.slug FROM vaultcore.exams s WHERE s.board_slug = e.slug)) >= 1
 		    OR (SELECT count(*) FROM vaultcore.mocks mk WHERE mk.exam_slug = e.slug) >= 1)
-		  AND (SELECT count(*) FROM vaultcore.exams c WHERE c.board_slug = e.slug) <> 1
 		UNION ALL
 		-- Skip near-empty papers (too thin to index → Google marks them Soft 404).
 		-- Count real question rows, not the stored column, so stale counts can't leak.
