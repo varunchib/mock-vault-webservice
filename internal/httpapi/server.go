@@ -574,11 +574,6 @@ func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
 		if examSlug != "" {
 			paths = append(paths, "/exam/"+examSlug)
 		}
-		if questions, err := s.repo.ListQuestionsByPaper(ctx, paperSlug); err == nil {
-			for _, q := range questions {
-				paths = append(paths, questionURLPath(q.URLCode, q.Question))
-			}
-		}
 		s.submitIndexNowPaths(ctx, paths)
 	}()
 }
@@ -1133,7 +1128,6 @@ func (s *Server) handleDeleteQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "question.delete", slug, nil)
-	s.pingIndexNow("/question/" + slug)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question deleted"})
 }
 
@@ -1182,7 +1176,6 @@ func (s *Server) handleUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidatePublicCache(r.Context())
 	s.audit(r, "question.update", slug, nil)
-	s.pingIndexNow("/question/" + slug)
 	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Question updated", "slug": slug})
 }
 
@@ -1770,33 +1763,15 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	// Inviting search engines to mass-crawl thin pages just earns "crawled —
 	// currently not indexed". Gate on explanation depth; ?minExplanation=0
 	// submits everything.
-	minExplanation := 300
-	if v := r.URL.Query().Get("minExplanation"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			minExplanation = n
-		}
-	}
 	structural := len(paths)
-	skipped := 0
-	if questions, qerr := s.repo.ListQuestions(r.Context()); qerr == nil {
-		for _, q := range questions {
-			if len(strings.TrimSpace(q.Explanation)) >= minExplanation {
-				paths = append(paths, questionURLPath(q.URLCode, q.Question))
-			} else {
-				skipped++
-			}
-		}
-	}
 
-	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths), "skippedThin": skipped})
+	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths)})
 	s.pingIndexNow(paths...)
 	s.respondJSON(w, http.StatusAccepted, map[string]any{
 		"message":        "Submitted to IndexNow",
 		"urls":           len(paths),
 		"structural":     structural,
-		"questions":      len(paths) - structural,
-		"skippedThin":    skipped,
-		"minExplanation": minExplanation,
+		"questions":      0,
 	})
 }
 
