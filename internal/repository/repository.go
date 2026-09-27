@@ -2018,11 +2018,6 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		-- a one-sentence explanation is still a substantial, unique page. 300
 		-- was dropping ~1,100 legitimate pages; 100 keeps everything except the
 		-- handful of true one-line stubs that Google could flag as thin.
-		SELECT 'question', COALESCE(q.url_code, substr(md5(q.slug), 1, 10)), q.updated_at, q.question
-		FROM vaultcore.questions q
-		WHERE q.paper_slug IS NOT NULL
-		  AND length(trim(q.explanation)) >= 100
-		  AND (SELECT count(*) FROM vaultcore.questions q2 WHERE q2.paper_slug = q.paper_slug) >= 5
 		ORDER BY 1, 2
 	`)
 	if err != nil {
