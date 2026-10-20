@@ -2001,7 +2001,6 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		SELECT 'paper', p.slug, p.updated_at, ''::text AS title
 		FROM vaultcore.papers p
 		WHERE (SELECT count(*) FROM vaultcore.questions q WHERE q.paper_slug = p.slug) >= 5
-		UNION ALL
 		-- Mock hubs are intentionally omitted while the Mocks feature is gated
 		-- ("coming soon") in the app: a /mock-test page cannot be attempted yet,
 		-- so it must not be advertised for indexing (the Worker also serves it
