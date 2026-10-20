@@ -126,8 +126,8 @@ const (
 	// empty list and read as a broken feature. ~15 entries x ~70B = ~1KB/user.
 	visitsRecentTTL = 7 * 24 * time.Hour
 	visitsRecentMax = 15
-	visitsTopPrefix    = "visits:top:"
-	visitsTopTTL       = 40 * 24 * time.Hour
+	visitsTopPrefix = "visits:top:"
+	visitsTopTTL    = 40 * 24 * time.Hour
 )
 
 func visitsTopKey(t time.Time) string { return visitsTopPrefix + t.UTC().Format("2006-01") }
@@ -524,6 +524,16 @@ var sitemapGuideSlugs = []string{
 	"jkssb-constable", "jkssb-constable-telecom",
 }
 
+// A deliberately small, reviewed indexing cohort. Keep this identical to the
+// Worker allow-list: a sitemap must never advertise a page that is noindex.
+var indexableQuestionPaths = []string{
+	"/question/with-reference-to-investments-consider-the-following-i-bonds-ii-hedge-funds--bd0394bb56",
+	"/question/which-of-the-following-are-the-sources-of-income-for-the-reserve--d14a7b378b",
+	"/question/consider-the-following-statements-i-india-has-joined-the-minerals-security-partn--5e628f3ca0",
+	"/question/consider-the-following-statements-statement-i-circular-economy-reduces-the-emiss--1a903c8462",
+	"/question/the-irrigation-device-called-araghatta-was--5847a27b82",
+}
+
 // canonicalPyqSlug maps a DB paper slug to the SEO slug actually used in URLs.
 func canonicalPyqSlug(slug string) string {
 	if c, ok := paperCanonicalSlug[slug]; ok {
@@ -579,7 +589,7 @@ func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
 }
 
 var (
-	kwMath  = regexp.MustCompile(`\$[^$]*\$`)
+	kwMath = regexp.MustCompile(`\$[^$]*\$`)
 	// Devanagari (U+0900-U+097F) is kept alongside a-z0-9 so Hindi questions get
 	// real keywords in their URL instead of collapsing to the bare id. Google
 	// accepts UTF-8 paths and displays them decoded, so a Hindi paper ranks on
@@ -686,6 +696,14 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 	}
 
 	// Editorial guide pages (not in the DB — rendered by the Worker).
+	// Only this individually reviewed cohort is indexable. Every other MCQ leaf
+	// page stays noindex and is intentionally absent from the sitemap.
+	for _, path := range indexableQuestionPaths {
+		fmt.Fprintf(&buf,
+			"  <url>\n    <loc>%s%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.6</priority>\n  </url>\n",
+			base, path)
+	}
+
 	for _, slug := range sitemapGuideSlugs {
 		fmt.Fprintf(&buf,
 			"  <url>\n    <loc>%s/guide/%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
@@ -1764,14 +1782,17 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	// currently not indexed". Gate on explanation depth; ?minExplanation=0
 	// submits everything.
 	structural := len(paths)
+	// Submit the same small question cohort advertised in the sitemap. Do not
+	// expand this automatically: every other question page remains noindex.
+	paths = append(paths, indexableQuestionPaths...)
 
 	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths)})
 	s.pingIndexNow(paths...)
 	s.respondJSON(w, http.StatusAccepted, map[string]any{
-		"message":        "Submitted to IndexNow",
-		"urls":           len(paths),
-		"structural":     structural,
-		"questions":      0,
+		"message":    "Submitted to IndexNow",
+		"urls":       len(paths),
+		"structural": structural,
+		"questions":  len(indexableQuestionPaths),
 	})
 }
 
