@@ -466,7 +466,7 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	const sfKey = "sitemap:xml"
-	const cacheKey = "cache:sitemap:xml"
+	const cacheKey = "cache:sitemap:xml:v2"
 	const ttl = time.Hour
 
 	if s.rdb != nil {
@@ -524,9 +524,8 @@ var sitemapGuideSlugs = []string{
 	"jkssb-constable", "jkssb-constable-telecom",
 }
 
-// A deliberately small, reviewed indexing cohort. Keep this identical to the
-// Worker allow-list: a sitemap must never advertise a page that is noindex.
-var indexableQuestionPaths = []string{
+// A small reviewed question set sent by the IndexNow bulk-submit endpoint.
+var indexNowQuestionPaths = []string{
 	"/question/with-reference-to-investments-consider-the-following-i-bonds-ii-hedge-funds--bd0394bb56",
 	"/question/which-of-the-following-are-the-sources-of-income-for-the-reserve--d14a7b378b",
 	"/question/consider-the-following-statements-i-india-has-joined-the-minerals-security-partn--5e628f3ca0",
@@ -693,15 +692,6 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 		fmt.Fprintf(&buf,
 			"  <url>\n    <loc>%s%s</loc>\n    <lastmod>%s</lastmod>\n    <changefreq>%s</changefreq>\n    <priority>%.1f</priority>\n  </url>\n",
 			base, loc, e.UpdatedAt.UTC().Format("2006-01-02"), freq, pri)
-	}
-
-	// Editorial guide pages (not in the DB — rendered by the Worker).
-	// Only this individually reviewed cohort is indexable. Every other MCQ leaf
-	// page stays noindex and is intentionally absent from the sitemap.
-	for _, path := range indexableQuestionPaths {
-		fmt.Fprintf(&buf,
-			"  <url>\n    <loc>%s%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.6</priority>\n  </url>\n",
-			base, path)
 	}
 
 	for _, slug := range sitemapGuideSlugs {
@@ -1776,15 +1766,11 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 	for _, g := range sitemapGuideSlugs {
 		paths = append(paths, "/guide/"+g)
 	}
-
-	// Question pages are only worth a crawl once they carry a real solution.
-	// Inviting search engines to mass-crawl thin pages just earns "crawled —
-	// currently not indexed". Gate on explanation depth; ?minExplanation=0
-	// submits everything.
+	// Submit the reviewed question seed cohort via IndexNow; the sitemap carries
+	// the full eligible question set from the database.
 	structural := len(paths)
-	// Submit the same small question cohort advertised in the sitemap. Do not
-	// expand this automatically: every other question page remains noindex.
-	paths = append(paths, indexableQuestionPaths...)
+
+	paths = append(paths, indexNowQuestionPaths...)
 
 	s.audit(r, "indexnow.submit_all", "", map[string]any{"urls": len(paths)})
 	s.pingIndexNow(paths...)
@@ -1792,7 +1778,7 @@ func (s *Server) handleIndexNowSubmitAll(w http.ResponseWriter, r *http.Request)
 		"message":    "Submitted to IndexNow",
 		"urls":       len(paths),
 		"structural": structural,
-		"questions":  len(indexableQuestionPaths),
+		"questions":  len(indexNowQuestionPaths),
 	})
 }
 

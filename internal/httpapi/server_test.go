@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"mock-vault-webservice/internal/models"
+	"mock-vault-webservice/internal/repository"
 )
 
 func q(slug, answerKey string) models.Question {
@@ -219,6 +220,17 @@ func TestKeywordifyCapsAreRuneSafe(t *testing.T) {
 func TestQuestionURLPathFallsBackToBareID(t *testing.T) {
 	if got := questionURLPath("abc123", ""); got != "/question/abc123" {
 		t.Errorf("questionURLPath with no keywords = %q, want /question/abc123", got)
+	}
+}
+
+func TestBuildSitemapIncludesQuestionEntries(t *testing.T) {
+	xml := string(buildSitemapXML([]repository.SitemapEntry{{
+		Kind:  "question",
+		Slug:  "abc123",
+		Title: "A sample question?",
+	}}))
+	if !strings.Contains(xml, "<loc>https://ministryofpapers.com/question/a-sample-question--abc123</loc>") {
+		t.Errorf("sitemap did not include canonical question URL: %s", xml)
 	}
 }
 
