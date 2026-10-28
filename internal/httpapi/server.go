@@ -466,7 +466,7 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	const sfKey = "sitemap:xml"
-	const cacheKey = "cache:sitemap:xml:v2"
+	const cacheKey = "cache:sitemap:xml:v3"
 	const ttl = time.Hour
 
 	if s.rdb != nil {
