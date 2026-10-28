@@ -658,6 +658,7 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 	}{
 		{"/", "weekly", 1.0},
 		{"/exams", "daily", 0.9},
+		{"/rivers-of-india", "monthly", 0.7},
 		{"/about", "monthly", 0.5},
 		{"/privacy", "yearly", 0.3},
 		{"/terms", "yearly", 0.3},
