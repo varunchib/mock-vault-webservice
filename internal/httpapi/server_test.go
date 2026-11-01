@@ -180,6 +180,9 @@ func TestKeywordify(t *testing.T) {
 		// English is untouched by the Devanagari change.
 		{"He deals ______ stationery.", "he-deals-stationery"},
 		{"REGRET:", "regret"},
+		{"Q57. Astronomical (A) temperatures (B) are usually estimated from spectroscopic (C) measurements (D).",
+			"astronomical-a-temperatures-b-are-usually-estimated-from-spectroscopic-c-measure"},
+		{"Question 12: Choose the correct answer.", "choose-the-correct-answer"},
 		{"Choose the correct synonym of ‘audacity’:", "choose-the-correct-synonym-of-audacity"},
 		// Hindi now yields real keywords instead of an empty slug.
 		{"‘कठोर’ के लिए समानार्थक शब्द है:", "कठोर-के-लिए-समानार्थक-शब्द-है"},

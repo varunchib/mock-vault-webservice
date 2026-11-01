@@ -594,6 +594,7 @@ func (s *Server) pingIndexNowPaper(paperSlug, examSlug string) {
 
 var (
 	kwMath = regexp.MustCompile(`\$[^$]*\$`)
+	kwQuestionNumber = regexp.MustCompile(`(?i)^\s*(question\s*#?\s*|q\s*\.?\s*)\d+\s*([.):\-]|–|—)\s*`)
 	// Devanagari (U+0900-U+097F) is kept alongside a-z0-9 so Hindi questions get
 	// real keywords in their URL instead of collapsing to the bare id. Google
 	// accepts UTF-8 paths and displays them decoded, so a Hindi paper ranks on
@@ -606,6 +607,7 @@ var (
 // to the Worker's canonical URL (no redirect chains). Builds the keyword part of
 // a question URL: /question/<keywords>--<id>.
 func keywordify(text string) string {
+	text = kwQuestionNumber.ReplaceAllString(text, "")
 	s := kwMath.ReplaceAllString(text, " ")
 	s = kwMarks.Replace(s)
 	s = strings.ToLower(s)
