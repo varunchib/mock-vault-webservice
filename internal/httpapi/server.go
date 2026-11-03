@@ -466,7 +466,7 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	const sfKey = "sitemap:xml"
-	const cacheKey = "cache:sitemap:xml:v4"
+	const cacheKey = "cache:sitemap:xml:v5"
 	const ttl = time.Hour
 
 	if s.rdb != nil {
@@ -704,7 +704,7 @@ func buildSitemapXML(entries []repository.SitemapEntry) []byte {
 
 	for _, slug := range sitemapGuideSlugs {
 		fmt.Fprintf(&buf,
-			"  <url>\n    <loc>%s/guide/%s</loc>\n    <changefreq>monthly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
+			"  <url>\n    <loc>%s/guide/%s</loc>\n    <lastmod>2026-11-03</lastmod>\n    <changefreq>monthly</changefreq>\n    <priority>0.7</priority>\n  </url>\n",
 			base, slug)
 	}
 

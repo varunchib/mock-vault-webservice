@@ -238,6 +238,9 @@ func TestBuildSitemapIncludesQuestionEntries(t *testing.T) {
 	if !strings.Contains(xml, "<loc>https://ministryofpapers.com/rivers-of-india</loc>") {
 		t.Errorf("sitemap did not include Rivers of India page: %s", xml)
 	}
+	if !strings.Contains(xml, "<loc>https://ministryofpapers.com/guide/jkpsi</loc>\n    <lastmod>2026-11-03</lastmod>") {
+		t.Errorf("sitemap did not include the guide content update date: %s", xml)
+	}
 }
 
 // realIP keeps reading the leftmost entry on purpose: the SSR Worker forwards
