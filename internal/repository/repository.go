@@ -292,7 +292,7 @@ func (r *PostgresRepository) GetQuestionBySlug(ctx context.Context, slug string)
 	row := r.db.QueryRowContext(ctx, `
 		SELECT slug, exam_slug, COALESCE(paper_slug, ''), exam_name, year, paper, subject, question_no, COALESCE(passage, ''), question, options, answer_key, answer, explanation, tags, translations, COALESCE(images, '[]'::jsonb), COALESCE(url_code, substr(md5(slug), 1, 10))
 		FROM vaultcore.questions
-		WHERE slug = $1 OR url_code = $1
+		WHERE slug = $1 OR url_code = $1 OR substr(md5(slug), 1, 10) = $1
 	`, slug)
 	question, err := scanQuestion(row)
 	if err != nil {
@@ -331,7 +331,7 @@ func (r *PostgresRepository) ListRelatedQuestions(ctx context.Context, slug stri
 			SELECT slug, exam_slug, COALESCE(paper_slug, '') AS paper_slug,
 			       subject, exam_name, paper, tags
 			  FROM vaultcore.questions
-			 WHERE slug = $1 OR url_code = $1
+			 WHERE slug = $1 OR url_code = $1 OR substr(md5(slug), 1, 10) = $1
 			 LIMIT 1
 		), cand AS (
 			SELECT q.url_code, q.question, q.subject,
@@ -1985,6 +1985,13 @@ func (r *PostgresRepository) ListAuditLog(ctx context.Context, limit int) ([]mod
 
 func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapEntry, error) {
 	rows, err := r.db.QueryContext(ctx, `
+		WITH paper_counts AS (
+			SELECT paper_slug, count(*) AS q_count
+			FROM vaultcore.questions
+			WHERE paper_slug IS NOT NULL
+			GROUP BY paper_slug
+			HAVING count(*) > 0
+		)
 		-- Exam hubs. Include an exam that has real content of its own OR rolled up
 		-- from its sub-exams (counted, so the drifting stored papers column can't
 		-- leak). A board remains an indexable navigational hub even with one child:
@@ -1996,33 +2003,15 @@ func (r *PostgresRepository) ListSitemapEntries(ctx context.Context) ([]SitemapE
 		             OR p.exam_slug IN (SELECT s.slug FROM vaultcore.exams s WHERE s.board_slug = e.slug)) >= 1
 		    OR (SELECT count(*) FROM vaultcore.mocks mk WHERE mk.exam_slug = e.slug) >= 1)
 		UNION ALL
-		-- Skip near-empty papers (too thin to index → Google marks them Soft 404).
-		-- Count real question rows, not the stored column, so stale counts can't leak.
+		-- Skip empty papers (0 questions). Count real question rows via CTE.
 		SELECT 'paper', p.slug, p.updated_at, ''::text AS title
 		FROM vaultcore.papers p
-		WHERE (SELECT count(*) FROM vaultcore.questions q WHERE q.paper_slug = p.slug) >= 5
+		JOIN paper_counts pc ON pc.paper_slug = p.slug
 		UNION ALL
-		-- Mock hubs are intentionally omitted while the Mocks feature is gated
-		-- ("coming soon") in the app: a /mock-test page cannot be attempted yet,
-		-- so it must not be advertised for indexing (the Worker also serves it
-		-- noindex). Re-enable this block when mocks launch:
-		--   SELECT 'mock_exam', m.exam_slug, MAX(m.updated_at)
-		--   FROM vaultcore.mocks m
-		--   WHERE EXISTS (SELECT 1 FROM vaultcore.questions q WHERE q.mock_slug = m.slug)
-		--   GROUP BY m.exam_slug
-		--   UNION ALL
-		-- Individual solved-question pages. The question must belong to an
-		-- indexable paper (>= 5 questions) and carry a real explanation. The
-		-- threshold is 100 chars, not the old 300: a solved-MCQ page also has
-		-- the question, four options, the correct answer, subject and tags, so
-		-- a one-sentence explanation is still a substantial, unique page. 300
-		-- was dropping ~1,100 legitimate pages; 100 keeps everything except the
-		-- handful of true one-line stubs that Google could flag as thin.
+		-- Individual solved-question pages belonging to any non-empty paper.
 		SELECT 'question', COALESCE(q.url_code, substr(md5(q.slug), 1, 10)), q.updated_at, q.question
 		FROM vaultcore.questions q
-		WHERE q.paper_slug IS NOT NULL
-		  AND length(trim(q.explanation)) >= 100
-		  AND (SELECT count(*) FROM vaultcore.questions q2 WHERE q2.paper_slug = q.paper_slug) >= 5
+		JOIN paper_counts pc ON pc.paper_slug = q.paper_slug
 		ORDER BY 1, 2
 	`)
 	if err != nil {

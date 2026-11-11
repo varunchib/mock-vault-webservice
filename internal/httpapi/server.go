@@ -194,7 +194,7 @@ func (s *Server) Shutdown() {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.cors(s.withRateLimit("global", 300, time.Minute, s.limitRequestBody(s.mux))))
+	return s.securityHeaders(s.cors(s.withRateLimit("global", 3000, time.Minute, s.limitRequestBody(s.mux))))
 }
 
 // limitRequestBody caps non-GET/HEAD/OPTIONS request bodies at 32 MB to prevent OOM attacks.
@@ -275,7 +275,7 @@ func (s *Server) checkRateLimit(ctx context.Context, key string, limit int, wind
 	}
 	pipe := s.rdb.Pipeline()
 	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
+	pipe.ExpireNX(ctx, key, window)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return true, int64(limit) // Redis down → fail open, never block traffic
 	}
@@ -350,53 +350,53 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.handleLogout), false))
 
 	// Public catalog endpoints — per-IP rate limits to block scrapers/bots.
-	// Global 300/min still applies on top of these.
-	s.mux.Handle("GET /api/v1/exams", s.withRateLimit("catalog", 60, time.Minute,
+	// Global 3000/min still applies on top of these.
+	s.mux.Handle("GET /api/v1/exams", s.withRateLimit("catalog", 600, time.Minute,
 		s.cachedPublic("catalog:exams", 5*time.Minute, s.handleListExams)))
-	s.mux.Handle("GET /api/v1/exams/{slug}", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/exams/{slug}", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "exam:" + r.PathValue("slug")
 		}, s.handleGetExam)))
-	s.mux.Handle("GET /api/v1/exams/{slug}/papers", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/exams/{slug}/papers", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "papers:exam:" + r.PathValue("slug")
 		}, s.handleListExamPapers)))
-	s.mux.Handle("GET /api/v1/exams/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/exams/{slug}/questions", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "questions:exam:" + r.PathValue("slug")
 		}, s.handleListExamQuestions)))
-	s.mux.Handle("GET /api/v1/questions/{slug}", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/questions/{slug}", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "question:" + r.PathValue("slug")
 		}, s.handleGetQuestion)))
 	// Related questions change only when content is added, so they cache far
 	// longer than the question itself — the SSR worker fetches this on every
 	// crawl of every question page.
-	s.mux.Handle("GET /api/v1/questions/{slug}/related", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/questions/{slug}/related", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(6*time.Hour, func(r *http.Request) string {
 			return "question:related:" + r.PathValue("slug")
 		}, s.handleGetRelatedQuestions)))
-	s.mux.Handle("GET /api/v1/papers", s.withRateLimit("catalog", 60, time.Minute,
+	s.mux.Handle("GET /api/v1/papers", s.withRateLimit("catalog", 600, time.Minute,
 		s.cachedPublic("papers:all", 5*time.Minute, s.handleListPapers)))
-	s.mux.Handle("GET /api/v1/papers/{slug}", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/papers/{slug}", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "paper:" + r.PathValue("slug")
 		}, s.handleGetPaper)))
-	s.mux.Handle("GET /api/v1/papers/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/papers/{slug}/questions", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "paper:questions:" + r.PathValue("slug")
 		}, s.handleListPaperQuestions)))
-	s.mux.Handle("GET /api/v1/mocks", s.withRateLimit("catalog", 60, time.Minute,
+	s.mux.Handle("GET /api/v1/mocks", s.withRateLimit("catalog", 600, time.Minute,
 		s.cachedPublic("mocks:all", 5*time.Minute, s.handleListMocks)))
-	s.mux.Handle("GET /api/v1/mocks/{slug}", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/mocks/{slug}", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "mock:" + r.PathValue("slug")
 		}, s.handleGetMock)))
-	s.mux.Handle("GET /api/v1/mocks/{slug}/questions", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/mocks/{slug}/questions", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "mock:questions:" + r.PathValue("slug")
 		}, s.handleListMockQuestions)))
-	s.mux.Handle("GET /api/v1/exams/{slug}/cutoffs", s.withRateLimit("pub", 120, time.Minute,
+	s.mux.Handle("GET /api/v1/exams/{slug}/cutoffs", s.withRateLimit("pub", 1500, time.Minute,
 		s.cachedPublicKey(5*time.Minute, func(r *http.Request) string {
 			return "cutoffs:exam:" + r.PathValue("slug")
 		}, s.handleGetExamCutoffs)))

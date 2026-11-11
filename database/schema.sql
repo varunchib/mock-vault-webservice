@@ -175,6 +175,10 @@ CREATE TABLE IF NOT EXISTS vaultcore.user_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_questions_exam_slug ON vaultcore.questions(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_questions_paper_slug ON vaultcore.questions(paper_slug);
+-- Question URLs fall back to substr(md5(slug),1,10) when url_code is NULL, and
+-- GetQuestionBySlug matches on that expression. Without this index every
+-- question page request would sequentially scan the whole table.
+CREATE INDEX IF NOT EXISTS idx_questions_md5_code ON vaultcore.questions ((substr(md5(slug), 1, 10)));
 CREATE INDEX IF NOT EXISTS idx_questions_mock_slug ON vaultcore.questions(mock_slug);
 CREATE INDEX IF NOT EXISTS idx_papers_exam_slug ON vaultcore.papers(exam_slug);
 CREATE INDEX IF NOT EXISTS idx_mocks_exam_slug ON vaultcore.mocks(exam_slug);
